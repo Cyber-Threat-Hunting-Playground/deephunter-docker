@@ -20,7 +20,7 @@ RUN apt-get update -y && \
 COPY resources/ /resources
 
 # Trust custom Root CA certificates (corporate proxies, internal services)
-RUN if ls /resources/root_ca/*.crt >/dev/null 2>&1; then \
+RUN if test -f /resources/root_ca/*.crt 2>/dev/null || [ "$(find /resources/root_ca/ -name '*.crt' -type f 2>/dev/null | wc -l)" -gt 0 ]; then \
         cp /resources/root_ca/*.crt /usr/local/share/ca-certificates/ && \
         update-ca-certificates; \
     fi
@@ -91,9 +91,9 @@ RUN mkdir -p /var/log/supervisor && \
 # are core subpackages, not test suites, and scipy imports them at init.
 RUN find /data/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
     find /data/venv -name '*.pyc' -delete 2>/dev/null; \
-    rm -rf /data/venv/lib/python*/site-packages/pip \
-           /data/venv/lib/python*/site-packages/pip-*.dist-info; \
-    rm -f  /data/venv/bin/pip /data/venv/bin/pip3 /data/venv/bin/pip3.*; \
+    rm -rf "/data/venv/lib/python"*/site-packages/pip \
+           "/data/venv/lib/python"*/site-packages/pip-*.dist-info; \
+    rm -f  "/data/venv/bin"/pip "/data/venv/bin"/pip3 "/data/venv/bin"/pip3.*; \
     find /data/deephunter -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
     rm -rf /data/deephunter/docs /data/deephunter/.git; \
     rm -rf /data/tmp /resources /tmp/*.tar.gz /tmp/install.log; \
@@ -110,12 +110,12 @@ ARG BUILD_DATE
 ARG VCS_REF
 
 LABEL maintainer="deephunter" \
-      org.label-schema.build-date=$BUILD_DATE \
+      org.label-schema.build-date="${BUILD_DATE}" \
       org.label-schema.name="deephunter" \
       org.label-schema.description="DeepHunter Security Analytics Platform" \
-      org.label-schema.version=$DEEPHUNTER_VERSION \
+      org.label-schema.version="${DEEPHUNTER_VERSION}" \
       org.label-schema.vcs-url="https://github.com/${GITHUB_REPO}" \
-      org.label-schema.vcs-ref=$VCS_REF \
+      org.label-schema.vcs-ref="${VCS_REF}" \
       org.label-schema.schema-version="1.0"
 
 # Copy application and data from builder
