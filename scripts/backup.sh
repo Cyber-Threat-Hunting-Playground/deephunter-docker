@@ -19,7 +19,6 @@ RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 
 # Container names
 DB_CONTAINER="deephunter-mariadb"
-APP_CONTAINER="deephunter-app"
 
 echo -e "${BLUE}==================================="
 echo "DeepHunter Backup Script"
@@ -80,7 +79,7 @@ fi
 
 echo -e "${BLUE}Step 4/4: Cleaning old backups...${NC}"
 # Remove backups older than retention period
-find "${BACKUP_DIR}" -name "deephunter_backup_*.tar.gz" -type f -mtime +${RETENTION_DAYS} -delete
+find "${BACKUP_DIR}" -name "deephunter_backup_*.tar.gz" -type f -mtime +"${RETENTION_DAYS}" -delete
 echo -e "${GREEN}✓ Cleanup completed${NC}"
 
 # Calculate backup size

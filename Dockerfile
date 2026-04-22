@@ -4,6 +4,8 @@ FROM debian:bookworm-slim AS builder
 ARG GITHUB_REPO=Cyber-Threat-Hunting-Playground/deephunter
 ARG DEEPHUNTER_VERSION=2.5
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Install prerequisites
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -20,8 +22,7 @@ RUN apt-get update -y && \
 COPY resources/ /resources
 
 # Trust custom Root CA certificates (corporate proxies, internal services)
-RUN set -o pipefail && \
-    if test -f /resources/root_ca/*.crt 2>/dev/null || [ "$(find /resources/root_ca/ -name '*.crt' -type f 2>/dev/null | wc -l)" -gt 0 ]; then \
+RUN if test -f /resources/root_ca/*.crt 2>/dev/null || [ "$(find /resources/root_ca/ -name '*.crt' -type f 2>/dev/null | wc -l)" -gt 0 ]; then \
         cp /resources/root_ca/*.crt /usr/local/share/ca-certificates/ && \
         update-ca-certificates; \
     fi
@@ -70,23 +71,19 @@ COPY patch/deephunter/api_auth.py /data/deephunter/deephunter/api_auth.py
 COPY patch/config/decorators.py /data/deephunter/config/decorators.py
 
 # Strip Windows CRLF from scripts and Python files (safety net for local tarballs)
-RUN set -o pipefail && \
-    find /data -type f \( -name '*.py' -o -name '*.sh' \) -exec sed -i 's/\r$//' {} +
+RUN find /data -type f \( -name '*.py' -o -name '*.sh' \) -exec sed -i 's/\r$//' {} +
 
 # Collect static files (admin, DRF, Swagger, etc.) into STATIC_ROOT
 WORKDIR /data/deephunter
-RUN set -o pipefail && \
-    /data/venv/bin/python manage.py collectstatic --noinput 2>/dev/null || true
+RUN /data/venv/bin/python manage.py collectstatic --noinput 2>/dev/null || true
 
 # Install crontab
-RUN set -o pipefail && \
-    mkdir -p /var/spool/cron/crontabs/ && \
+RUN mkdir -p /var/spool/cron/crontabs/ && \
     cp /data/deephunter/install/scripts/common/crontab /var/spool/cron/crontabs/root && \
     chmod 600 /var/spool/cron/crontabs/root
 
 # Supervisor configuration
-RUN set -o pipefail && \
-    mkdir -p /var/log/supervisor && \
+RUN mkdir -p /var/log/supervisor && \
     mv /resources/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # ── Trim build-only artifacts before copying to final stage ────────────
@@ -94,8 +91,7 @@ RUN set -o pipefail && \
 # setuptools/pkg_resources are kept (runtime need).
 # NOTE: do NOT rm test/tests/testing dirs — packages like numpy.testing
 # are core subpackages, not test suites, and scipy imports them at init.
-RUN set -o pipefail && \
-    find /data/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
+RUN find /data/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
     find /data/venv -name '*.pyc' -delete 2>/dev/null; \
     rm -rf "/data/venv/lib/python"*/site-packages/pip \
            "/data/venv/lib/python"*/site-packages/pip-*.dist-info; \
@@ -109,6 +105,8 @@ RUN set -o pipefail && \
 # Final stage – runtime only, no build tools
 # ======================================================================
 FROM debian:bookworm-slim
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG GITHUB_REPO=Cyber-Threat-Hunting-Playground/deephunter
 ARG DEEPHUNTER_VERSION=2.5
@@ -157,8 +155,7 @@ COPY --from=builder /etc/ssl /etc/ssl
 
 # Trust custom Root CA certificates (corporate proxies, internal services)
 COPY resources/root_ca/ /usr/local/share/ca-certificates/custom/
-RUN set -o pipefail && \
-    update-ca-certificates || true
+RUN update-ca-certificates || true
 
 # Point Python/requests at the system CA bundle so custom Root CAs are trusted
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -166,8 +163,7 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Create service accounts (least-privilege: separate user per daemon)
 # www-data needs group write on plugins/ and deephunter/wsgi.py for connector install/toggle
-RUN set -o pipefail && \
-    groupadd -r deephunter && \
+RUN groupadd -r deephunter && \
     useradd -r -g deephunter -d /data/deephunter -s /sbin/nologin deephunter && \
     usermod -aG deephunter www-data && \
     groupadd -r celery && \

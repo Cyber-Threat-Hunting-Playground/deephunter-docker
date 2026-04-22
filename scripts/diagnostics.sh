@@ -6,8 +6,6 @@ set -e
 # Colors
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 OUTPUT_FILE="deephunter-diagnostics-$(date +%Y%m%d-%H%M%S).txt"
@@ -34,7 +32,7 @@ echo ""
     echo ""
     echo "CPU:"
     lscpu | grep "Model name" || echo "N/A"
-    echo "CPU Cores:" $(nproc)
+    echo "CPU Cores: $(nproc)"
     echo ""
     echo "Memory:"
     free -h
@@ -142,7 +140,7 @@ echo ""
     if [ -f .env ]; then
         echo "Environment file exists"
         echo "Variables (sanitized):"
-        cat .env | grep -v "PASSWORD" | grep -v "SECRET" || echo "Unable to read .env"
+        grep -v "PASSWORD" .env | grep -v "SECRET" || echo "Unable to read .env"
     else
         echo ".env file not found"
     fi
