@@ -45,15 +45,13 @@ mkdir -p "${TEMP_DIR}"
 
 echo -e "${BLUE}Step 1/4: Backing up MariaDB database...${NC}"
 # Backup database
-docker exec "${DB_CONTAINER}" mariadb-dump \
+if docker exec "${DB_CONTAINER}" mariadb-dump \
     -u root -p"${MARIADB_ROOT_PASSWORD:-password}" \
     --all-databases \
     --single-transaction \
     --quick \
     --lock-tables=false \
-    > "${TEMP_DIR}/database.sql"
-
-if [ $? -eq 0 ]; then
+    > "${TEMP_DIR}/database.sql"; then
     echo -e "${GREEN}✓ Database backup completed${NC}"
 else
     echo -e "${RED}✗ Database backup failed${NC}"
@@ -71,9 +69,7 @@ echo -e "${GREEN}✓ Configuration backup completed${NC}"
 
 echo -e "${BLUE}Step 3/4: Compressing backup...${NC}"
 # Create compressed archive
-tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "${BACKUP_DIR}" "${BACKUP_NAME}"
-
-if [ $? -eq 0 ]; then
+if tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "${BACKUP_DIR}" "${BACKUP_NAME}"; then
     echo -e "${GREEN}✓ Compression completed${NC}"
     # Remove temporary directory
     rm -rf "${TEMP_DIR}"
