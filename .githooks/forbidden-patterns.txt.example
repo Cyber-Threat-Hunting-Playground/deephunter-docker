@@ -1,0 +1,6 @@
+# Forbidden strings (case-insensitive, one per line).
+# Copy this file to forbidden-patterns.txt and add your real patterns:
+#   cp .githooks/forbidden-patterns.txt.example .githooks/forbidden-patterns.txt
+#
+# Lines starting with # are ignored. Blank lines are ignored.
+# Matching uses fixed-string, case-insensitive grep (no regex).

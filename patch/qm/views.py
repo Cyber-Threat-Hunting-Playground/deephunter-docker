@@ -1,0 +1,1571 @@
+import logging
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404, render
+from django.template.loader import render_to_string
+from django.contrib.auth.models import User
+from django.contrib.auth.decorators import login_required, permission_required
+from django.http import HttpResponse, HttpResponseRedirect, HttpResponseForbidden, JsonResponse
+from django.db.models import Q, Sum, Count, F
+from django.core.paginator import Paginator
+from django.urls import reverse
+from datetime import datetime, timedelta, timezone
+import numpy as np
+from scipy import stats
+from math import isnan
+from .models import (Country, Analytic, Snapshot, Campaign, TargetOs, Vulnerability, ThreatActor,
+    ThreatName, MitreTactic, MitreTechnique, Endpoint, Tag, TasksStatus, Category, Review,
+    SavedSearch, Repo, CampaignCompletion)
+from notifications.models import UserNotification
+from connectors.models import Connector
+from .tasks import regenerate_stats, regenerate_campaign
+import ipaddress
+from connectors.utils import is_connector_enabled, is_connector_for_analytics, get_connector_conf
+from config.app_settings import get_ai_connector
+from celery import current_app
+from .utils import get_campaign_date, get_available_statuses, find_sha_by_parent_sha
+from urllib.parse import urlencode, quote
+from .forms import (ReviewForm, EditAnalyticDescriptionForm, EditAnalyticNotesForm,
+                    EditAnalyticQueryForm, SavedSearchForm, AnalyticForm, TagForm,
+                    ThreatForm, ActorForm, VulnerabilityForm, QueryAIAssistantForm)
+from notifications.utils import add_error_notification, add_debug_notification
+from config.models import log_ai_query
+import base64
+import time
+
+logger = logging.getLogger(__name__)
+
+# Dynamically import all connectors
+import importlib
+import pkgutil
+import plugins
+all_connectors = {}
+for loader, module_name, is_pkg in pkgutil.iter_modules(plugins.__path__):
+    module = importlib.import_module(f"plugins.{module_name}")
+    all_connectors[module_name] = module
+
+
+PROXY = settings.PROXY
+DEBUG = settings.DEBUG
+STATIC_PATH = settings.STATIC_ROOT
+BASE_DIR = settings.BASE_DIR
+UPDATE_ON = settings.UPDATE_ON
+DB_DATA_RETENTION = settings.DB_DATA_RETENTION
+GITHUB_LATEST_RELEASE_URL = settings.GITHUB_LATEST_RELEASE_URL
+GITHUB_COMMIT_URL = settings.GITHUB_COMMIT_URL
+CAMPAIGN_MAX_HOSTS_THRESHOLD = settings.CAMPAIGN_MAX_HOSTS_THRESHOLD
+ON_MAXHOSTS_REACHED = settings.ON_MAXHOSTS_REACHED
+ANALYTICS_PER_PAGE = settings.ANALYTICS_PER_PAGE
+DAYS_BEFORE_REVIEW = settings.DAYS_BEFORE_REVIEW
+
+@login_required
+@permission_required("qm.view_analytic", raise_exception=True)
+def list_analytics(request):
+
+    analytics = Analytic.objects.all().order_by('id')
+    
+    posted_search = ''
+    posted_filters = {}
+    
+    if request.GET:
+        
+        if 'search' in request.GET:
+            analytics = analytics.filter(
+                Q(name__icontains=request.GET['search'])
+                | Q(description__icontains=request.GET['search'])
+                | Q(notes__icontains=request.GET['search'])
+            )
+            posted_search = request.GET['search']
+            
+        if 'connectors' in request.GET:
+            analytics = analytics.filter(connector__pk__in=request.GET.getlist('connectors'))
+            posted_filters['connectors'] = request.GET.getlist('connectors')
+
+        if 'repos' in request.GET:
+            analytics = analytics.filter(repo__pk__in=request.GET.getlist('repos'))
+            posted_filters['repos'] = request.GET.getlist('repos')
+
+        if 'categories' in request.GET:
+            if '0' in request.GET.getlist('categories'):
+                if len(request.GET.getlist('categories')) > 1:
+                    # the empty category is selected in addition to other categories
+                    listcategories = request.GET.getlist('categories')
+                    listcategories.remove('0')
+                    analytics = analytics.filter(
+                        Q(category__pk__in=listcategories)
+                        | Q(category__isnull=True)
+                    )
+                else:
+                    # only the empty category is selected
+                    analytics = analytics.filter(category__isnull=True)
+            else:
+                # only existing categories are selected
+                analytics = analytics.filter(category__pk__in=request.GET.getlist('categories'))
+            posted_filters['categories'] = request.GET.getlist('categories')
+
+        if 'target_os' in request.GET:
+            if '0' in request.GET.getlist('target_os'):
+                if len(request.GET.getlist('target_os')) > 1:
+                    # the empty target OS is selected in addition to other target OS
+                    listos = request.GET.getlist('target_os')
+                    listos.remove('0')
+                    analytics = analytics.filter(
+                        Q(target_os__pk__in=listos)
+                        | Q(target_os__isnull=True)
+                    )
+                else:
+                    # only the empty target OS is selected
+                    analytics = analytics.filter(target_os__isnull=True)
+            else:
+                # only existing target OS are selected
+                analytics = analytics.filter(target_os__pk__in=request.GET.getlist('target_os'))
+            posted_filters['target_os'] = request.GET.getlist('target_os')
+        
+        if 'vulnerabilities' in request.GET:
+            analytics = analytics.filter(vulnerabilities__pk__in=request.GET.getlist('vulnerabilities'))
+            posted_filters['vulnerabilities'] = request.GET.getlist('vulnerabilities')
+        
+        if 'tags' in request.GET:
+            analytics = analytics.filter(tags__pk__in=request.GET.getlist('tags'))
+            posted_filters['tags'] = request.GET.getlist('tags')
+        
+        if 'actors' in request.GET:
+            analytics = analytics.filter(actors__pk__in=request.GET.getlist('actors'))
+            posted_filters['actors'] = request.GET.getlist('actors')
+        
+        if 'source_countries' in request.GET:
+            # List of all APT associated to the selected source countries
+            apt = []
+            for countryid in request.GET.getlist('source_countries'):
+                country = get_object_or_404(Country, pk=countryid)
+                for i in ThreatActor.objects.filter(source_country=country):
+                    apt.append(i.id)
+            analytics = analytics.filter(actors__pk__in=apt)
+            posted_filters['source_countries'] = request.GET.getlist('source_countries')
+        
+        if 'threats' in request.GET:
+            analytics = analytics.filter(threats__pk__in=request.GET.getlist('threats'))
+            posted_filters['threats'] = request.GET.getlist('threats')
+        
+        if 'mitre_techniques' in request.GET:
+            if '0' in request.GET.getlist('mitre_techniques'):
+                if len(request.GET.getlist('mitre_techniques')) > 1:
+                    # the empty MITRE technique is selected in addition to other techniques
+                    listtechniques = request.GET.getlist('mitre_techniques')
+                    listtechniques.remove('0')
+                    analytics = analytics.filter(
+                        Q(mitre_techniques__pk__in=request.GET.getlist('mitre_techniques'))
+                        | Q(mitre_techniques__mitre_technique__pk__in=request.GET.getlist('mitre_techniques'))
+                        | Q(mitre_techniques__isnull=True)
+                    )
+                else:
+                    # only the empty MITRE technique is selected
+                    analytics = analytics.filter(mitre_techniques__isnull=True)
+            else:
+                # only existing MITRE techniques are selected
+                analytics = analytics.filter(
+                    Q(mitre_techniques__pk__in=request.GET.getlist('mitre_techniques'))
+                    | Q(mitre_techniques__mitre_technique__pk__in=request.GET.getlist('mitre_techniques'))
+                )
+            posted_filters['mitre_techniques'] = request.GET.getlist('mitre_techniques')
+
+        if 'mitre_tactics' in request.GET:
+            analytics = analytics.filter(mitre_techniques__mitre_tactic__pk__in=request.GET.getlist('mitre_tactics'))
+            posted_filters['mitre_tactics'] = request.GET.getlist('mitre_tactics')
+        
+        if 'confidence' in request.GET:
+            analytics = analytics.filter(confidence__in=request.GET.getlist('confidence'))
+            posted_filters['confidence'] = request.GET.getlist('confidence')
+        
+        if 'relevance' in request.GET:
+            analytics = analytics.filter(relevance__in=request.GET.getlist('relevance'))
+            posted_filters['relevance'] = request.GET.getlist('relevance')
+
+        if 'statuses' in request.GET:
+            analytics = analytics.filter(status__in=request.GET.getlist('statuses'))
+            posted_filters['statuses'] = request.GET.getlist('statuses')
+
+        if 'run_daily' in request.GET:
+            if request.GET['run_daily'] == '1':
+                analytics = analytics.filter(run_daily=True)
+                posted_filters['run_daily'] = 1
+            else:
+                analytics = analytics.filter(run_daily=False)
+                posted_filters['run_daily'] = 0
+
+        if 'run_daily_lock' in request.GET:
+            if request.GET['run_daily_lock'] == '1':
+                analytics = analytics.filter(run_daily_lock=True)
+                posted_filters['run_daily_lock'] = 1
+            else:
+                analytics = analytics.filter(run_daily_lock=False)
+                posted_filters['run_daily_lock'] = 0
+
+        if 'create_rule' in request.GET:
+            if request.GET['create_rule'] == '1':
+                analytics = analytics.filter(create_rule=True)
+                posted_filters['create_rule'] = 1
+            else:
+                analytics = analytics.filter(create_rule=False)
+                posted_filters['create_rule'] = 0
+
+        if 'dynamic_query' in request.GET:
+            if request.GET['dynamic_query'] == '1':
+                analytics = analytics.filter(dynamic_query=True)
+                posted_filters['dynamic_query'] = 1
+            else:
+                analytics = analytics.filter(dynamic_query=False)
+                posted_filters['dynamic_query'] = 0
+
+        if 'hits' in request.GET:
+            # Get yesterday's date
+            yesterday = datetime.now() - timedelta(days=1)
+            yesterday_date = yesterday.date()  # Get the date part
+
+            if request.GET['hits'] == '1':
+                # Filter queries where related Snapshot has hits_count > 0 and date is yesterday
+                analytics = analytics.filter(
+                    snapshot__hits_count__gt=0,
+                    snapshot__date=yesterday_date
+                ).distinct()
+                posted_filters['hits'] = 1
+            else:
+                # Filter analytics where related Snapshot has hits_count = 0 and date is yesterday
+                analytics = analytics.filter(
+                    snapshot__hits_count=0,
+                    snapshot__date=yesterday_date
+                ).distinct()
+                posted_filters['hits'] = 0
+
+        if 'alreadyseen' in request.GET:
+            if request.GET['alreadyseen'] == '1':
+                analytics = analytics.filter(analyticmeta__last_time_seen__isnull=False)
+                posted_filters['alreadyseen'] = 1
+            else:
+                analytics = analytics.filter(analyticmeta__last_time_seen__isnull=True)
+                posted_filters['alreadyseen'] = 0
+
+        if 'maxhosts' in request.GET:
+            if request.GET['maxhosts'] == '1':
+                analytics = analytics.filter(analyticmeta__maxhosts_count__gt=0)
+                posted_filters['maxhosts'] = 1
+            else:
+                analytics = analytics.filter(analyticmeta__maxhosts_count=0)
+                posted_filters['maxhosts'] = 0
+
+        if 'queryerror' in request.GET:
+            if request.GET['queryerror'] == '1':
+                analytics = analytics.filter(analyticmeta__query_error=True)
+                posted_filters['queryerror'] = 1
+            else:
+                analytics = analytics.filter(analyticmeta__query_error=False)
+                posted_filters['queryerror'] = 0
+
+        if 'created_by' in request.GET:
+            if '0' in request.GET.getlist('created_by'):
+                if len(request.GET.getlist('created_by')) > 1:
+                    # the empty user is selected in addition to other users
+                    listusers = request.GET.getlist('created_by')
+                    listusers.remove('0')
+                    analytics = analytics.filter(
+                        Q(created_by__pk__in=listusers)
+                        | Q(created_by__isnull=True)
+                        )
+                else:
+                    # only the empty user is selected
+                    analytics = analytics.filter(created_by__isnull=True)
+            else:
+                # only existing users are selected
+                analytics = analytics.filter(created_by__pk__in=request.GET.getlist('created_by'))
+            
+            posted_filters['created_by'] = request.GET.getlist('created_by')
+
+    # Exclude analytics that are archived
+    analytics = analytics.exclude(status='ARCH').distinct()
+
+    for analytic in analytics:
+        snapshot = Snapshot.objects.filter(analytic=analytic, date=datetime.today()-timedelta(days=1)).order_by('date')
+        if len(snapshot) > 0:
+            snapshot = snapshot[0]
+            analytic.hits_endpoints = snapshot.hits_endpoints
+            analytic.hits_count = snapshot.hits_count
+            analytic.anomaly_alert_count = snapshot.anomaly_alert_count
+            analytic.anomaly_alert_endpoints = snapshot.anomaly_alert_endpoints
+        else:
+            analytic.hits_endpoints = 0
+            analytic.hits_count = 0
+        
+        # Sparkline: show sparkline only for last 20 days event count
+        snapshots = Snapshot.objects.filter(analytic=analytic, date__gt=datetime.today()-timedelta(days=20))
+        analytic.sparkline = [snapshot.hits_endpoints for snapshot in snapshots]
+        
+    # Paginate the analytics list
+    analytics_count = analytics.count()
+    paginator = Paginator(analytics, ANALYTICS_PER_PAGE)
+    page_number = int(request.GET.get('page', 1))
+    page_obj = paginator.get_page(page_number)
+    # Save filters to query string for pagination
+    querydict = request.GET.copy()
+    if 'page' in querydict:
+        del querydict['page']
+    query_string = querydict.urlencode()
+
+    # for "save search" feature
+    filtered_querydict = request.GET.copy()
+    if 'page' in filtered_querydict:
+        del filtered_querydict['page']
+    if 'csrfmiddlewaretoken' in filtered_querydict:
+        del filtered_querydict['csrfmiddlewaretoken']
+    if 'search' in request.GET:
+        if request.GET['search'].strip() == '':
+            del filtered_querydict['search']
+    if filtered_querydict:
+        filtered_query_string = quote(filtered_querydict.urlencode(), safe='')
+    else:
+        filtered_query_string = ''
+
+    context = {
+        'analytics': page_obj,
+        'query_string': query_string,
+        'filtered_query_string': filtered_query_string,
+        'analytics_count': analytics_count,
+        'connectors': Connector.objects.filter(domain="analytics", enabled=True).order_by('name'),
+        'repos': Repo.objects.all(),
+        'target_os': TargetOs.objects.all(),
+        'vulnerabilities': Vulnerability.objects.all(),
+        'tags': Tag.objects.all(),
+        'threat_actors': ThreatActor.objects.all(),
+        'source_countries': Country.objects.all(),
+        'threat_names': ThreatName.objects.all(),
+        'mitre_tactics': MitreTactic.objects.all(),
+        'mitre_techniques': MitreTechnique.objects.all(),
+        'categories': Category.objects.all(),
+        'statuses': [{'name': name, 'description': description} for name,description in Analytic.STATUS_CHOICES if name != 'ARCH'],
+        'created_by': User.objects.filter(id__in=Analytic.objects.exclude(created_by__isnull=True).values('created_by').distinct()),
+        'posted_search': posted_search,
+        'posted_filters': posted_filters,
+    }
+    return render(request, 'list_analytics.html', context)
+    
+@login_required
+@permission_required("qm.view_snapshot", raise_exception=True)
+def trend(request, analytic_id, tab=0):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    endpoints = Endpoint.objects.filter(snapshot__analytic=analytic).values('hostname').distinct()
+
+    context = {
+        'analytic': analytic,
+        'distinct_endpoints': endpoints.count(),
+        'endpoints': endpoints,
+        'tab': tab,
+        }
+    return render(request, 'trend.html', context)
+
+@login_required
+@permission_required("qm.view_snapshot", raise_exception=True)
+def trend_graph(request, analytic_id, tab=0):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    # show graph for last 90 days only
+    snapshots = Snapshot.objects.filter(analytic=analytic, date__gt=datetime.today()-timedelta(days=90)).order_by('date')
+    
+    stats_vals = []
+    date = [snapshot.date for snapshot in snapshots]
+    runtime = [snapshot.runtime for snapshot in snapshots]
+    a_count = np.array([snapshot.hits_count for snapshot in snapshots])
+    z_count = stats.zscore(a_count)
+    a_endpoints = np.array([snapshot.hits_endpoints for snapshot in snapshots])
+    z_endpoints = stats.zscore(a_endpoints)
+    a_anomaly_alert_count = np.array([snapshot.anomaly_alert_count for snapshot in snapshots])
+    a_anomaly_alert_endpoints = np.array([snapshot.anomaly_alert_endpoints for snapshot in snapshots])
+
+    for i,v in enumerate(a_count):
+        stats_vals.append( {
+            'date': date[i],
+            'runtime': runtime[i],
+            'hits_count': a_count[i],
+            'zscore_count': z_count[i],
+            'hits_endpoints': a_endpoints[i],
+            'zscore_endpoints': z_endpoints[i],
+            'anomaly_alert_count': a_anomaly_alert_count[i],
+            'anomaly_alert_endpoints': a_anomaly_alert_endpoints[i]
+            } )
+
+    context = {
+        'analytic': analytic,
+        'stats': stats_vals,
+        'tab': tab,
+        }
+    return render(request, 'trend_graph.html', context)
+
+@login_required
+@permission_required("qm.view_analytic", raise_exception=True)
+def analyticdetail(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)    
+    
+    # Populate the list of endpoints (top 10) that matched the analytic for the last campaign
+    try:
+        snapshots = Snapshot.objects.filter(analytic=analytic, date=datetime.today()-timedelta(days=1))
+        endpoints = []
+        for snapshot in snapshots:
+            for e in Endpoint.objects.filter(snapshot=snapshot):
+                endpoints.append(e.hostname)
+        # remove duplicated values (due to endpoints appearing in several snapshots)
+        endpoints = list(set(endpoints))[:10]
+    except:
+        endpoints = []
+
+    # get celery status for the selected analytic
+    try:
+        celery_status = get_object_or_404(TasksStatus, taskname=analytic.name)
+        progress = round(celery_status.progress)
+    except:
+        progress = 999
+            
+    context = {
+        'analytic': analytic,
+        'endpoints': endpoints,
+        'progress': progress
+        }
+    return render(request, 'analytic_detail.html', context)
+
+@login_required
+@permission_required("qm.view_timeline", raise_exception=True)
+def timeline(request):
+
+    hostname = ''
+
+    if request.GET:
+        hostname = request.GET['hostname'].strip()
+    
+    context = {
+        'hostname': hostname,
+        }
+    return render(request, 'timeline.html', context)
+
+@login_required
+@permission_required("qm.view_timeline", raise_exception=True)
+def tl_timeline(request, hostname):
+
+    groups = []
+    items = []
+    items2 = []
+    gid = 0 # group id
+    iid = 0 # item id
+    storylineid_json = {}
+    connectors_json = {}
+
+    potential_threat_names = []
+    potential_threat_actors = []
+    potential_vulnerabilities = []
+    mitre_coverage = []
+
+    apps = ''
+
+    endpoints = Endpoint.objects.filter(hostname=hostname).order_by('snapshot__date')
+    for e in endpoints:
+        # search if group already exists
+        g = next((group for group in groups if group['content'] == f'{e.snapshot.analytic.name} ({e.snapshot.analytic.connector.name})'), None)
+        # if group does not exist yet, create it
+        if g:
+            g = g['id']
+        else:
+            groups.append({'id':gid, 'analyticid':e.snapshot.analytic.id, 'content':f'{e.snapshot.analytic.name} ({e.snapshot.analytic.connector.name})'})
+            g = gid
+            gid += 1
+            
+        # populate items and refer to relevant group
+        items.append({
+            'id': iid,
+            'group': g,
+            'start': e.snapshot.date,
+            'end': e.snapshot.date+timedelta(days=1),
+            'description': 'Signature: {}'.format(e.snapshot.analytic.name),
+            'connector': 'Connector: {}'.format(e.snapshot.analytic.connector.name),
+            'storylineid': 'StorylineID: {}'.format(e.storylineid.replace('#', ', ')),
+            'threat_names': ', '.join([t.name for t in e.snapshot.analytic.threats.all()]),
+            'threat_actors': ', '.join([t.name for t in e.snapshot.analytic.actors.all()]),
+            'vulnerabilities': ', '.join([v.name for v in e.snapshot.analytic.vulnerabilities.all()]),
+            })
+        storylineid_json[iid] = e.storylineid.split('#')
+        connectors_json[iid] = e.snapshot.analytic.connector.name
+        iid += 1
+
+        potential_threat_names.extend(e.snapshot.analytic.threats.all())
+        potential_threat_actors.extend(e.snapshot.analytic.actors.all())
+        potential_vulnerabilities.extend(e.snapshot.analytic.vulnerabilities.all())
+        mitre_coverage.extend(e.snapshot.analytic.mitre_techniques.all())
+
+
+    # Populate threats (group ID >= 1000 for easy identification in template)
+    gid = 1000
+    sincedate = (datetime.today()-timedelta(days=DB_DATA_RETENTION)).isoformat()
+
+    # Recursively call the get_threats function in each connector to build a consolidated list of threats
+    for connector in all_connectors.values():
+
+        connector_name = connector.__name__.split('.')[1]
+
+        # we only call get_threats() if the connector is enabled and has this method
+        if is_connector_enabled(connector_name) and is_connector_for_analytics(connector_name) and hasattr(connector, 'get_threats'):
+            # If the connector has a get_threats method, call it
+            #try:
+            threats = connector.get_threats(hostname, sincedate)
+
+            if threats:
+                groups.append({'id':gid, 'content':f'Threats ({connector_name})'})
+                for threat in threats:
+                    try:
+                        detectedat = threat['threatInfo']['identifiedAt']
+                        detectedatdate = datetime.strptime(detectedat[:10], '%Y-%m-%d')
+                        items.append({
+                            'id': iid,
+                            'group': gid,
+                            'start': detectedatdate,
+                            'end': detectedatdate + timedelta(days=1),
+                            'description': '{} [{}] [{}]'.format(
+                                threat['threatInfo']['threatName'],
+                                threat['threatInfo']['analystVerdict'],
+                                threat['threatInfo']['confidenceLevel']
+                                ),
+                            'storylineid': 'StorylineID: {}'.format(threat['threatInfo']['storyline']),
+                            'connector': f'Connector: {connector_name}'
+                            })
+                        storylineid_json[iid] = [threat['threatInfo']['storyline']]
+                        connectors_json[iid] = connector_name
+                        iid += 1
+                    except Exception as e:
+                        if DEBUG:
+                            add_debug_notification(f"Error adding threat for {hostname} in timeline: {e}")
+            #except Exception as e:
+            #    print(f"Error getting threats for {hostname}")
+        
+            # We increment the group ID for each connector to ensure unique group IDs
+            gid += 1
+
+    ###
+    # The below content is only available if SentinelOne connector is enabled
+    ###
+    if is_connector_enabled('sentinelone'):
+
+        # Get machine details from SentinelOne            
+        machinedetails = all_connectors.get('sentinelone').get_machine_details(hostname)
+        if machinedetails:
+            agent_id = machinedetails['id']
+
+            if agent_id:
+            
+                # Populate applications (group ID = 500 for easy identification in template)
+                gid = 500
+                groups.append({'id':gid, 'content':'Apps install (sentinelone)'})
+                
+                createdat = (datetime.today()-timedelta(days=DB_DATA_RETENTION))
+                apps = all_connectors.get('sentinelone').get_applications(agent_id)
+                if apps:
+                    for app in apps:
+                        if app['installedDate']:
+                            if datetime.strptime(app['installedDate'][:10], '%Y-%m-%d') >= createdat:
+                                items.append({
+                                    'id': iid,
+                                    'group': gid,
+                                    'start':  datetime.strptime(app['installedDate'][:10], '%Y-%m-%d'),
+                                    'end': datetime.strptime(app['installedDate'][:10], '%Y-%m-%d')+timedelta(days=1),
+                                    'description': '{} ({})'.format(app['name'].strip(), app['publisher'].strip())
+                                    })
+                                iid += 1
+
+    # Visualization #2 (graph)
+    items2 = Endpoint.objects.filter(hostname=hostname) \
+        .values('snapshot__date') \
+        .annotate(cumulative_score=Sum('snapshot__analytic__weighted_relevance')) \
+        .order_by('snapshot__date')
+
+
+    context = {
+        'hostname': hostname,
+        'apps': apps,
+        'groups': groups,
+        'items': items,
+        'items2': items2,
+        'mindate': datetime.today()-timedelta(days=DB_DATA_RETENTION+1),
+        'maxdate': datetime.today()+timedelta(days=1),
+        'storylineid_json': storylineid_json,
+        'connectors_json': connectors_json,
+        'potential_threat_names': list(set(potential_threat_names)),
+        'potential_threat_actors': list(set(potential_threat_actors)),
+        'potential_vulnerabilities': list(set(potential_vulnerabilities)),
+        'mitre_coverage': list(set(mitre_coverage)),
+    }
+    return render(request, 'partials/tl_timeline.html', context)
+
+
+@login_required
+@permission_required("qm.view_timeline", raise_exception=True)
+def tl_host(request, hostname):
+
+    machinedetails = {}
+    user_name = ''
+    job_title = ''
+    business_unit = ''
+    location = ''
+
+    if is_connector_enabled('sentinelone'):
+
+        # Get machine details from SentinelOne            
+        machinedetails = all_connectors.get('sentinelone').get_machine_details(hostname)
+        if machinedetails:
+            agent_id = machinedetails['id']
+
+            if agent_id:
+                # Get username
+                username = all_connectors.get('sentinelone').get_last_logged_in_user(agent_id)
+                if is_connector_enabled('activedirectory') and username:
+                    entry = all_connectors.get('activedirectory').ldap_search(username)
+                    if entry:
+                        user_name = entry.displayName
+                        job_title = entry.title
+                        business_unit = entry.division
+                        location = "{}, {}".format(entry.physicalDeliveryOfficeName, entry.co)
+    
+    context = {
+        'machinedetails': machinedetails,
+        'username': username,
+        'user_name': user_name,
+        'job_title': job_title,
+        'business_unit': business_unit,
+        'location': location,
+        }
+    return render(request, 'partials/tl_host.html', context)
+
+
+@login_required
+@permission_required("qm.view_timeline", raise_exception=True)
+def tl_ad(request, hostname):
+
+    machinedetails = {}
+    if is_connector_enabled('sentinelone'):
+
+        # Get machine details from SentinelOne            
+        machinedetails = all_connectors.get('sentinelone').get_machine_details(hostname)
+    
+    context = {
+        'machinedetails': machinedetails,
+        }
+    return render(request, 'partials/tl_ad.html', context)
+
+@login_required
+@permission_required("qm.view_timeline", raise_exception=True)
+def tl_apps(request, hostname):
+    apps = []
+
+    if is_connector_enabled('sentinelone'):
+        # Get machine details from SentinelOne            
+        machinedetails = all_connectors.get('sentinelone').get_machine_details(hostname)
+        if machinedetails:
+            agent_id = machinedetails['id']
+            if agent_id:            
+                apps = all_connectors.get('sentinelone').get_applications(agent_id)
+
+    context = {
+        'apps': apps,
+        }
+    return render(request, 'partials/tl_apps.html', context)
+
+@login_required
+@permission_required("qm.run_query", raise_exception=True)
+def events(request, analytic_id, eventdate=None, endpointname=None):
+    """
+    Redirect to the analytic link in the connector's data lake.
+    """
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    return HttpResponseRedirect(all_connectors.get(analytic.connector.name).get_redirect_analytic_link(analytic, eventdate, endpointname))
+
+@login_required
+def threats(request, connector, endpointname, date):
+    """
+    Redirect to the threats link in the connector's data lake.
+    """
+    return HttpResponseRedirect(all_connectors.get(connector).get_redirect_threats_link(endpointname, date))
+
+@login_required
+@permission_required("qm.run_query", raise_exception=True)
+def storyline(request, storylineids, eventdate):
+    """
+    Redirect to Singularity DataLake in S1 with results related to the queried storyline ID(s).
+    Only relevant for SentinelOne connector.
+    """
+    return HttpResponseRedirect(all_connectors.get('sentinelone').get_redirect_storyline_link(storylineids, eventdate))
+
+@login_required
+@permission_required("qm.change_snapshot", raise_exception=True)
+def regen(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+        
+    # start the celery task (defined in qm/tasks.py)
+    taskid = regenerate_stats.delay(analytic_id)
+
+    # Create task in TasksStatus object
+    celery_status = TasksStatus(
+        taskname=analytic.name,
+        taskid = taskid,
+        started_by = request.user
+    )
+    celery_status.save()
+
+    return HttpResponse('running...')
+
+@login_required
+@permission_required("qm.change_snapshot", raise_exception=True)
+def cancelregen(request, taskid):
+    try:
+        # without signal='SIGKILL', the task is not cancelled immediately
+        current_app.control.revoke(taskid, terminate=True, signal='SIGKILL')
+        # delete task in DB
+        celery_status = get_object_or_404(TasksStatus, taskid=taskid)
+        celery_status.delete()
+        return HttpResponse('stopping...')
+    except Exception as e:
+        add_error_notification(f'Cancel stats regeneration: Error terminating Celery Task: {e}')
+        return HttpResponse(f'Error terminating Celery Task: {e}')
+
+@login_required
+def progress(request, analytic_id):
+    try:
+        analytic = get_object_or_404(Analytic, pk=analytic_id)
+        celery_status = get_object_or_404(TasksStatus, taskname=analytic.name)
+        button = f'<span><b>Task progress:</b> {round(celery_status.progress)}%'
+        button += f' | <button hx-get="/qm/cancelregen/{celery_status.taskid}/" class="buttonred">CANCEL</button></span>'
+        return HttpResponse(button)
+    except:
+        return HttpResponse(f'<button hx-get="/qm/{analytic_id}/regen/" class="buttonred">Regenerate stats</button>')
+
+@login_required
+@permission_required("qm.delete_snapshot", raise_exception=True)
+def deletestats(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    Snapshot.objects.filter(analytic=analytic).delete()
+    return HttpResponse('Stats deleted')
+
+@login_required
+@permission_required("qm.view_netview", raise_exception=True)
+def netview(request):
+    debug = ''    
+    ips = []
+    if request.GET:
+        if 'hostname' in request.GET:
+            hostname = request.GET['hostname'].strip()
+        else:
+            hostname = ''
+        
+        if 'storylineid' in request.GET:
+            storylineid = request.GET['storylineid'].strip()
+        else:
+            storylineid = ''
+            
+        if 'timerange' in request.GET:
+            timerange = int(request.GET['timerange'])
+        else:
+            timerange = 24
+        
+        if hostname == '' and storylineid == '':
+            debug = 'Missing Endpoint and/or Storyline ID'
+
+        else:
+
+            # Recursively call the get_network_connections function in each connector to build a consolidated list of network connections
+            network_connections = []
+            for connector in all_connectors.values():
+                connector_name = connector.__name__.split('.')[1]
+                # we only call get_network_connections() if the connector is enabled and has this method
+                if is_connector_enabled(connector_name) and is_connector_for_analytics(connector_name) and hasattr(connector, 'get_network_connections'):
+                    # If the connector has a get_network_connections method, call it
+                    #try:
+                    connections = connector.get_network_connections(endpoint_name=hostname, timerange=timerange, storyline_id=storylineid)
+                    if connections:
+                        network_connections.append({
+                            'connector': connector_name,
+                            'connections': connections
+                            })
+
+            # Merge all connections from different connectors into a single list
+            data = []
+            if network_connections:
+                for entry in network_connections:
+                    for conn in entry['connections']:
+                        data.append( (entry['connector'], conn[0], conn[2], conn[3]) )
+            # Sort data by ascending popularity (all connectors mixed)
+            sorted_data = sorted(data, key=lambda x: x[-1])
+
+            if len(sorted_data) != 0:
+                for ip in sorted_data:
+                    
+                    if ip[1]:
+                        # if private ip, don't scan with VT
+                        if ipaddress.ip_address(ip[1]).is_private:
+                            iptype = 'PRIV'
+                            vt = ''
+                        else:
+                            iptype = 'PUBL'
+                            vt = {}
+                            if is_connector_enabled('virustotal'):
+                                response = all_connectors.get('virustotal').check_ip(ip[1])
+                                try:
+                                    vt['malicious'] = response['attributes']['last_analysis_stats']['malicious']
+                                    vt['suspicious'] = response['attributes']['last_analysis_stats']['suspicious']
+                                    vt['whois'] = response['attributes']['whois']
+                                except KeyError:
+                                    vt['malicious'] = 0
+                                    vt['suspicious'] = 0
+                                    vt['whois'] = ''
+                                    debug = 'No VT data for IP: {}'.format(ip[1])
+
+                        ips.append({
+                            'connector': ip[0],
+                            'dstip': ip[1],
+                            'iptype': iptype,
+                            'dstports': ip[2],
+                            'freq': int(ip[3]),
+                            'vt': vt
+                            })
+            
+       
+    else:
+        hostname = ''
+        storylineid = ''
+        timerange = ''
+    
+    context = {
+        'hostname': hostname,
+        'storylineid': storylineid,
+        'timerange': timerange,
+        'ips': ips,
+        'debug': debug
+        }
+    return render(request, 'netview.html', context)
+
+@login_required
+def about(request):    
+    # local version
+    with open(f'{STATIC_PATH}/VERSION', 'r') as f:
+        version = f.readline().strip()
+    # commit version
+    with open(f'{STATIC_PATH}/commit_id.txt', 'r') as f:
+        version_commit = find_sha_by_parent_sha(f.readline().strip())
+    # local version MITRE
+    with open(f'{STATIC_PATH}/VERSION_MITRE', 'r') as f:
+        version_mitre = f.readline().strip()
+    
+    context = {
+        'version': version,
+        'version_commit': version_commit,
+        'version_mitre': version_mitre,
+        }
+    return render(request, 'about.html', context)
+
+@login_required
+@permission_required("qm.view_campaign", raise_exception=True)
+def managecampaigns(request):
+    results = []
+    campaigns = Campaign.objects.filter(name__startswith='daily_cron_').order_by('-name')
+    for campaign in campaigns:
+        analytics_target = campaign.nb_queries
+        analytics_run = CampaignCompletion.objects.filter(campaign=campaign).aggregate(
+            total_queries=Sum('nb_queries_complete')
+        )['total_queries']
+        completion = round(analytics_run * 100 / analytics_target, 1) if analytics_target > 0 else 0
+        results.append({
+            'name': campaign.name,
+            'date_start': campaign.date_start,
+            'date_end': campaign.date_end,
+            'nb_queries_target': analytics_target,
+            'nb_queries_run': analytics_run,
+            'completion': completion,
+        })
+
+    context = {'campaigns': results}
+    return render(request, 'managecampaigns.html', context)
+
+@login_required
+@permission_required("qm.change_campaign", raise_exception=True)
+def regencampaign(request, campaign_name):
+    campaign = get_object_or_404(Campaign, name=campaign_name)
+    campaign_name = campaign.name
+    campaign_date = get_campaign_date(campaign)
+    # Delete campaign and all related snapshots/endpoints
+    campaign.delete()
+    
+    # start the celery task (defined in qm/tasks.py)
+    taskid = regenerate_campaign.delay(campaigndate=campaign_date)
+
+    # Create task in TasksStatus object
+    celery_status = TasksStatus(
+        taskname=campaign_name,
+        taskid=taskid,
+        started_by=request.user
+    )
+    celery_status.save()
+
+    return HttpResponse('running...')
+
+@login_required
+def regencampaignstatus(request, campaign_name):
+    try:
+        celery_status = get_object_or_404(TasksStatus, taskname=campaign_name)
+        button = f'<span><b>Task progress:</b> {round(celery_status.progress)}%'
+        # cancel task is only possible if task started from celery (not if campaign is running from cron)
+        if celery_status.taskid:
+            button += f' | <button hx-get="/qm/cancelregen/{celery_status.taskid}/" class="buttonred">CANCEL</button>'
+        button += '</span>'
+        return HttpResponse(button)
+    except:
+        return HttpResponse(f'<button hx-get="/qm/regencampaign/{campaign_name}/" class="buttonred">Regenerate</button>')
+
+@login_required
+@permission_required("qm.view_savedsearch", raise_exception=True)
+def saved_searches(request):
+    """
+    Loads the saved searches page.
+    """
+    context = {}
+    return render(request, 'saved_searches.html', context)
+
+@login_required
+@permission_required("qm.view_savedsearch", raise_exception=True)
+def saved_searches_table(request):
+    """
+    Display saved searches for the current user.
+    """
+    only_show_user_saved_searches = request.GET.get('only_show_user_saved_searches', 'off') == 'on'  # Get checkbox value
+    if only_show_user_saved_searches:
+        saved_searches = SavedSearch.objects.filter(created_by=request.user).order_by('name')
+    else:
+        saved_searches = SavedSearch.objects.filter(Q(created_by=request.user) | Q(is_public=True)).order_by('name')
+    context = {'saved_searches': saved_searches}
+    return render(request, 'partials/saved_searches_table.html', context)
+
+@login_required
+@permission_required("qm.add_savedsearch", raise_exception=True)
+def saved_search_form(request, search_id=None):
+    if search_id:
+        saved_search = get_object_or_404(SavedSearch, pk=search_id)
+        # Only allow update if owned by the user or (public and unlocked)
+        if not (saved_search.created_by == request.user or (saved_search.is_public and not saved_search.is_locked)):
+            return HttpResponseForbidden("You do not have permission to update this saved search.")
+        initial = {}
+    else:
+        saved_search = None
+        # Get the initial search value from GET parameters
+        initial = {}
+        if 'search' in request.GET:
+            initial['search'] = request.GET['search']
+
+    if request.method == "POST":
+        form = SavedSearchForm(request.POST, instance=saved_search)
+        if form.is_valid():
+            obj = form.save(commit=False)
+            if not saved_search:
+                obj.created_by = request.user
+
+            obj.save()
+            return HttpResponseRedirect(reverse('saved_searches'))
+    else:
+        form = SavedSearchForm(instance=saved_search, initial=initial)
+    
+    context = {
+        "form": form,
+        "saved_search": saved_search
+    }
+    return render(request, "saved_search_form.html", context)
+
+@login_required
+@permission_required("qm.delete_savedsearch", raise_exception=True)
+def delete_saved_search(request, search_id):
+    saved_search = get_object_or_404(SavedSearch, pk=search_id)
+    # Only allow delete if owned by the user or (public and unlocked)
+    if (saved_search.created_by == request.user or (saved_search.is_public and not saved_search.is_locked)):
+        saved_search.delete()
+        return HttpResponseRedirect(reverse('saved_searches'))
+    else:
+        return HttpResponseForbidden("You do not have permission to delete this saved search.")
+
+@login_required
+@permission_required("qm.bulk_update_analytics", raise_exception=True)
+def search_in_admin(request):
+    """
+    Converts the list view search string into a search string compatible
+    with the admin backend (custom filters have been created in the admin)
+    """
+    search = request.GET['search']
+    search = search.replace('search=', 'q=')
+    search = search.replace('connectors=', 'connector=')
+    search = search.replace('repos=', 'repo=')
+    search = search.replace('categories=0', 'category=null')
+    search = search.replace('categories=', 'category=')
+    search = search.replace('source_countries=', 'actors__source_country=')
+    search = search.replace('mitre_tactics=', 'mitre_techniques__mitre_tactic=')
+    search = search.replace('mitre_techniques=0', 'mitre_techniques=null')
+    search = search.replace('statuses=', 'status=')
+    search = search.replace('maxhosts=1', 'analyticmeta__maxhosts_count=greater_than_zero')
+    search = search.replace('queryerror=', 'analyticmeta__query_error=')
+    search = search.replace('created_by=0', 'created_by=null')
+    return HttpResponseRedirect(f'/admin/qm/analytic/?not_status=ARCH&{search}')
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_description_initial(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/edit_description_initial.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_description_form(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "form": EditAnalyticDescriptionForm(initial={'description': analytic.description}),
+        "analytic_id": analytic.id,
+    }
+    return render(request, 'partials/edit_description_form.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_description_submit(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    if request.method == "POST":
+        form = EditAnalyticDescriptionForm(request.POST, instance=analytic)
+        if form.is_valid():
+            form.save()
+        else:
+            return render(request, 'partials/edit_description_form.html', {'analytic_id': analytic.id})
+    return HttpResponseRedirect(f"/qm/edit_description_initial/{analytic.id}")
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_notes_initial(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/edit_notes_initial.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_notes_form(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "form": EditAnalyticNotesForm(initial={'notes': analytic.notes}),
+        "analytic_id": analytic.id,
+    }
+    return render(request, 'partials/edit_notes_form.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_notes_submit(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    if request.method == "POST":
+        form = EditAnalyticNotesForm(request.POST, instance=analytic)
+        if form.is_valid():
+            form.save()
+        else:
+            return render(request, 'partials/edit_notes_form.html', {'analytic_id': analytic.id})
+    return HttpResponseRedirect(f"/qm/edit_notes_initial/{analytic.id}")
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_query_initial(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/edit_query_initial.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_query_form(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "form": EditAnalyticQueryForm(
+            initial={
+                'query': analytic.query,
+                'columns': analytic.columns
+            }
+        ),
+        "analytic_id": analytic.id,
+    }
+    return render(request, 'partials/edit_query_form.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_query_submit(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    if request.method == "POST":
+        form = EditAnalyticQueryForm(request.POST, instance=analytic)
+        if form.is_valid():
+            form.save()
+        else:
+            return render(request, 'partials/edit_query_form.html', {'analytic_id': analytic.id})
+    return HttpResponseRedirect(f"/qm/edit_query_initial/{analytic.id}")
+
+@login_required
+def status_button(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    
+    # List of statuses to be shown, depending on current status and defined workflow
+    statuses = get_available_statuses(analytic)
+
+    context = {
+        "analytic": analytic,
+        "statuses": statuses,
+    }
+    return render(request, 'partials/status_button.html', context)
+
+@login_required
+@permission_required("qm.change_analytic_status", raise_exception=True)
+def change_status(request, analytic_id, updated_status):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    
+    # sanitize user input to only allow valid statuses
+    if updated_status not in get_available_statuses(analytic):
+        return HttpResponseForbidden("Invalid status")
+
+    if updated_status == 'PUB_RUNDAILY':
+        analytic.run_daily = True
+        updated_status = 'PUB'
+    if updated_status == 'PUB_NO_RUNDAILY':
+        analytic.run_daily = False
+        updated_status = 'PUB'
+
+    analytic.status = updated_status
+    analytic.save()
+    
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/status_button.html', context)
+
+@login_required
+def confidence_button(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+        "confidence_choices": {str(k): v for k, v in Analytic.CONFIDENCE_CHOICES if k != analytic.confidence},
+    }
+    return render(request, 'partials/confidence_button.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def change_confidence(request, analytic_id, updated_confidence):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    analytic.confidence = updated_confidence
+    analytic.save()
+    
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/confidence_button.html', context)
+
+@login_required
+def relevance_button(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+        "relevance_choices": {str(k): v for k, v in Analytic.RELEVANCE_CHOICES if k != analytic.relevance},
+    }
+    return render(request, 'partials/relevance_button.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def change_relevance(request, analytic_id, updated_relevance):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    analytic.relevance = updated_relevance
+    analytic.save()
+    
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/relevance_button.html', context)
+
+@login_required
+def category_button(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    context = {
+        "analytic": analytic,
+        "category_choices": Category.objects.exclude(id=analytic.category.id) if analytic.category else Category.objects.all(),
+    }
+    return render(request, 'partials/category_button.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def change_category(request, analytic_id, updated_category_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    updated_category = get_object_or_404(Category, pk=updated_category_id)
+    analytic.category = updated_category
+    analytic.save()
+    
+    context = {
+        "analytic": analytic,
+    }
+    return render(request, 'partials/category_button.html', context)
+
+@login_required
+@permission_required("qm.delete_analytic", raise_exception=True)
+def delete_analytic(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    analytic.delete()
+    return HttpResponseRedirect(reverse('list_analytics'))
+
+@login_required
+@permission_required("qm.view_analytic", raise_exception=True)
+def rundailycheckbox(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    if analytic.run_daily:
+        if analytic.run_daily_lock:
+            return HttpResponse('<img src="/static/images/lock.png" width="20" />')
+        else:
+            return HttpResponse('<img src="/static/admin/img/icon-yes.svg" />')
+    else:
+        return HttpResponse('<img src="/static/admin/img/icon-no.svg" />')
+
+@login_required
+@permission_required("qm.view_review", raise_exception=True)
+def review_page(request, analytic_id):
+    form = ReviewForm()
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    reviews = Review.objects.filter(analytic=analytic).order_by('-date')
+    context = {
+        "form": form,
+        "analytic": analytic,
+        "reviews": reviews,
+    }
+    return render(request, 'review_page.html', context)
+
+
+@login_required
+@permission_required("qm.add_review", raise_exception=True)
+def submit_review(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    form = ReviewForm(request.POST)
+
+    if form.is_valid():
+        reviews = Review.objects.filter(analytic=analytic).order_by('-date'),
+
+        # commit set to False to simulate save and check errors
+        review = form.save(commit=False)
+        review.analytic = analytic
+        review.reviewer = request.user
+        review.save()
+
+        if form.cleaned_data['decision'] == 'PENDING':
+            analytic.status = 'PENDING'
+            analytic.save()
+            # run_daily flag will be set to False automatically (signals)
+            analytic.analyticmeta.next_review_date = None
+            analytic.analyticmeta.save()
+        elif form.cleaned_data['decision'] == 'KEEP':
+            analytic.status = 'PUB'
+            # Bug #186 - "Keep it running" option during review should automatically enable "run_daily" flag if unset
+            if not analytic.run_daily:
+                analytic.run_daily = True
+            # next_review_date will be set automatically (signals)
+            analytic.save()
+        elif form.cleaned_data['decision'] == 'LOCK':
+            analytic.status = 'PUB'
+            analytic.run_daily_lock = True
+            analytic.save()
+            analytic.analyticmeta.next_review_date = None
+            analytic.analyticmeta.save()
+        elif form.cleaned_data['decision'] == 'ARCH':
+            analytic.status = 'ARCH'
+            analytic.save()
+            analytic.analyticmeta.next_review_date = None
+            # run_daily flag will be set to False automatically (signals)
+            analytic.analyticmeta.save()
+        elif form.cleaned_data['decision'] == 'DEL':
+            analytic.delete()
+
+        return render(request, 'partials/review_form_success.html', {
+            'analytic': analytic,
+            'reviews': reviews,
+        })
+        
+    else:
+        return render(request, 'partials/review_form.html', {
+            'analytic': analytic,
+            'form': form,
+        })
+            
+@login_required
+@permission_required("qm.view_review", raise_exception=True)
+def reviews_table(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    reviews = Review.objects.filter(analytic=analytic).order_by('-date')
+    return render(request, 'partials/reviews_table.html', {
+        'analytic': analytic,
+        'reviews': reviews,
+    })
+
+
+@login_required
+@permission_required("qm.add_analytic", raise_exception=True)
+def add_analytic(request):
+    # For new analytics, only DRAFT and PUB statuses are allowed
+    form = AnalyticForm(request.POST if request.method == "POST" else None,
+                        allowed_status_choices=["DRAFT", "PUB"])
+    if request.method == "POST":
+        if form.is_valid():
+            analytic = form.save(commit=False) # commit=False to set created_by field
+            analytic.created_by = request.user
+            analytic.save()
+            form.save_m2m() # save ManyToMany relationships
+            return HttpResponseRedirect(f'/qm/listanalytics/?search={form.cleaned_data["name"]}')
+    context = {'form': form, 'AI_CONNECTOR': get_ai_connector()}
+    return render(request, 'analytic_form.html', context)
+
+@login_required
+@permission_required("qm.change_analytic", raise_exception=True)
+def edit_analytic(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    # For existing analytics, allowed statuses depend on current status and defined workflow
+    form = AnalyticForm(request.POST if request.method == "POST" else None,
+                        instance=analytic,
+                        allowed_status_choices=get_available_statuses(analytic, edit=True))
+    if request.method == "POST":
+        if form.is_valid():
+            form.save()
+            return HttpResponseRedirect(f'/qm/listanalytics/?search={form.cleaned_data["name"]}')
+    context = {
+        'form': form,
+        'analytic_id': analytic_id,
+        'AI_CONNECTOR': get_ai_connector()
+    }
+    return render(request, 'analytic_form.html', context)
+
+@login_required
+@permission_required("qm.add_analytic", raise_exception=True)
+def clone_analytic(request, analytic_id):
+    analytic = get_object_or_404(Analytic, pk=analytic_id)
+    # Prepare initial data from the analytic instance
+    initial = {field.name: getattr(analytic, field.name)
+               for field in Analytic._meta.fields
+               if field.name not in ['id', 'name', 'status', 'repo', 'created_by', 'pub_date']}
+    initial['name'] = ''  # Set name to empty
+
+    # For ManyToMany fields, you need to set initial as a list of IDs
+    m2m_fields = ['tags', 'mitre_techniques', 'threats', 'actors', 'target_os', 'vulnerabilities']
+    for field in m2m_fields:
+        initial[field] = getattr(analytic, field).all()
+
+    form = AnalyticForm(initial=initial, allowed_status_choices=["DRAFT", "PUB"])
+    context = {'form': form, 'AI_CONNECTOR': get_ai_connector()}
+    return render(request, 'analytic_form.html', context)
+
+@login_required
+@permission_required("qm.add_analytic", raise_exception=True)
+def suggest_mitre_with_ai(request):
+    if request.method == "POST":
+        query = request.POST.get('query', '')
+
+        ai_name = get_ai_connector()
+        if not ai_name:
+            log_ai_query(user=request.user, connector_name="", action="mitre_suggestion",
+                         input_text=query, success=False,
+                         error_message="No AI connector configured")
+            return JsonResponse([], safe=False)
+
+        if not is_connector_enabled(ai_name):
+            log_ai_query(user=request.user, connector_name=ai_name, action="mitre_suggestion",
+                         input_text=query, success=False,
+                         error_message=f"AI connector '{ai_name}' is not enabled")
+            return JsonResponse([], safe=False)
+
+        if not all_connectors.get(ai_name):
+            log_ai_query(user=request.user, connector_name=ai_name, action="mitre_suggestion",
+                         input_text=query, success=False,
+                         error_message=f"AI connector '{ai_name}' is not installed (missing plugin symlink)")
+            return JsonResponse([], safe=False)
+
+        t0 = time.monotonic()
+        try:
+            mitre_ttps = all_connectors.get(ai_name).get_mitre_techniques_from_query(query)
+        except Exception as e:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.exception("AI connector '%s' failed for suggest-mitre-with-ai", ai_name)
+            log_ai_query(
+                user=request.user, connector_name=ai_name, action="mitre_suggestion",
+                input_text=query, success=False,
+                error_message=str(e), duration_ms=duration_ms,
+            )
+            return JsonResponse({"error": f"AI connector error: {e}"}, status=500)
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        raw_output = ", ".join(mitre_ttps) if mitre_ttps else ""
+        log_ai_query(
+            user=request.user, connector_name=ai_name, action="mitre_suggestion",
+            input_text=query, output_text=raw_output, duration_ms=duration_ms,
+        )
+
+        ttp_ids = []
+        for mitre_ttp in mitre_ttps:
+            try:
+                technique = MitreTechnique.objects.get(mitre_id=mitre_ttp)
+                ttp_ids.append(technique.id)
+            except MitreTechnique.DoesNotExist:
+                pass
+
+        return JsonResponse(list(set(ttp_ids)), safe=False)
+
+    return JsonResponse([], safe=False)
+
+@login_required
+@permission_required("qm.add_tag", raise_exception=True)
+def add_tag(request):
+    form = TagForm(request.POST or None)
+    if form.is_valid():
+        tag = form.save()
+        response = HttpResponse("")
+        response['HX-Trigger'] = 'closeModal'
+        response['HX-Tag-id'] = tag.id
+        response['HX-Tag-name'] = tag.name
+        return response
+    return render(request, "partials/add_tag.html", {"form": form})
+
+@login_required
+@permission_required("qm.add_threatname", raise_exception=True)
+def add_threat(request):
+    form = ThreatForm(request.POST or None)
+    if form.is_valid():
+        threat = form.save()
+        response = HttpResponse("")
+        response['HX-Trigger'] = 'closeModal'
+        response['HX-Threat-id'] = threat.id
+        response['HX-Threat-name'] = threat.name
+        return response
+    return render(request, "partials/add_threat.html", {"form": form})
+
+@login_required
+@permission_required("qm.add_threatactor", raise_exception=True)
+def add_actor(request):
+    form = ActorForm(request.POST or None)
+    if form.is_valid():
+        actor = form.save()
+        response = HttpResponse("")
+        response['HX-Trigger'] = 'closeModal'
+        response['HX-Actor-id'] = actor.id
+        response['HX-Actor-name'] = actor.name
+        return response
+    return render(request, "partials/add_actor.html", {"form": form})
+
+@login_required
+@permission_required("qm.add_vulnerability", raise_exception=True)
+def add_vulnerability(request):
+    form = VulnerabilityForm(request.POST or None)
+    if form.is_valid():
+        vulnerability = form.save()
+        response = HttpResponse("")
+        response['HX-Trigger'] = 'closeModal'
+        response['HX-Vulnerability-id'] = vulnerability.id
+        response['HX-Vulnerability-name'] = vulnerability.name
+        return response
+    return render(request, "partials/add_vulnerability.html", {"form": form})
+
+@login_required
+@permission_required("qm.run_query", raise_exception=True)
+def test_query(request):
+    if request.method == "POST":
+
+        connector = get_object_or_404(Connector, pk=int(request.POST.get('connector')))
+        query = request.POST.get('query', '')
+        columns = request.POST.get('columns', '')
+
+        if connector.name and query:
+            if is_connector_enabled(connector.name):
+                connector = get_object_or_404(Connector, name=connector.name)
+                # Create a temporary Analytic object (not saved in DB) because get_redirect_analytic_link() needs it as input
+                analytic = Analytic(
+                    connector=connector,
+                    query=f"{query} {columns}"
+                )
+
+                return HttpResponse(all_connectors.get(connector.name).get_redirect_analytic_link(analytic))
+            else:
+                return HttpResponse("error: connector not enabled")
+        else:
+            return HttpResponse("error: missing connector and/or query")
+    else:
+        return HttpResponse("error: not a POST request")
+
+@login_required
+@permission_required("qm.run_query", raise_exception=True)
+def query_ai_assistant(request):
+    connector_id = request.GET.get('connector') if request.method == 'GET' else None
+    form = QueryAIAssistantForm(request.POST or None, selected_connector_id=connector_id)
+    if form.is_valid():
+        ai_name = get_ai_connector()
+        if not ai_name or not is_connector_enabled(ai_name):
+            err = "No AI connector configured" if not ai_name else f"AI connector '{ai_name}' is not enabled"
+            log_ai_query(user=request.user, connector_name=ai_name or "", action="query_assistant",
+                         input_text=form.cleaned_data.get('question', ''), success=False,
+                         error_message=err)
+            add_error_notification(
+                'Configure and enable an AI connector under Settings → Application (or settings.py).'
+            )
+            return render(request, 'partials/query_ai_assistant.html', {'form': form})
+
+        ai_module = all_connectors.get(ai_name)
+        if not ai_module or not hasattr(ai_module, 'write_query_with_ai'):
+            err_msg = f"AI connector '{ai_name}' is not installed" if not ai_module else f"AI connector '{ai_name}' does not support write_query_with_ai"
+            log_ai_query(user=request.user, connector_name=ai_name, action="query_assistant",
+                         input_text=form.cleaned_data.get('question', ''), success=False,
+                         error_message=err_msg)
+            add_error_notification('The selected AI connector does not support the query assistant.')
+            return render(request, 'partials/query_ai_assistant.html', {'form': form})
+
+        response = HttpResponse("")
+        response['HX-Trigger'] = 'closeModal'
+
+        query_language = all_connectors.get(form.cleaned_data['connector'].name).query_language()
+        question_for_ai = f"""Write a threat hunting query (Language: {query_language}) to detect the logic below. No explanations, only the query.
+        
+        Logic:
+
+        {form.cleaned_data['question']}
+        """
+
+        t0 = time.monotonic()
+        try:
+            ai_response = ai_module.write_query_with_ai(question_for_ai)
+        except Exception as e:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.exception("AI connector '%s' failed for query-ai-assistant", ai_name)
+            log_ai_query(
+                user=request.user,
+                connector_name=ai_name,
+                action="query_assistant",
+                input_text=question_for_ai,
+                success=False,
+                error_message=str(e),
+                duration_ms=duration_ms,
+            )
+            add_error_notification(f"AI connector error: {e}")
+            return render(request, 'partials/query_ai_assistant.html', {'form': form})
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_ai_query(
+            user=request.user,
+            connector_name=ai_name,
+            action="query_assistant",
+            input_text=question_for_ai,
+            output_text=ai_response,
+            duration_ms=duration_ms,
+        )
+
+        encoded_response = base64.b64encode(ai_response.encode('utf-8'))
+        response['HX-Query'] = encoded_response
+        response['HX-Connector'] = form.cleaned_data['connector'].id
+        return response
+
+    context = {
+        'form': form,
+    }
+    return render(request, 'partials/query_ai_assistant.html', context)

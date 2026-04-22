@@ -1,0 +1,10 @@
+# Keep shell scripts LF for WSL/Linux containers.
+*.sh text eol=lf
+
+# Common config/code files should also stay LF.
+Dockerfile text eol=lf
+Makefile text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf

@@ -1,0 +1,211 @@
+from django.db.models.signals import pre_save, post_save, post_delete
+from django.contrib.auth.signals import user_logged_in
+from django.dispatch import receiver
+from django.conf import settings
+from django.contrib.auth.models import User
+from datetime import datetime, timedelta
+from .models import Analytic, TasksStatus, AnalyticMeta
+from qm.utils import is_update_available, is_mitre_update_available
+from connectors.utils import is_connector_enabled
+from qm.tasks import regenerate_stats
+from notifications.utils import del_notification_by_uid, add_info_notification, add_error_notification, add_warning_notification
+import time
+
+# Dynamically import all connectors
+import importlib
+import pkgutil
+import plugins
+all_connectors = {}
+for loader, module_name, is_pkg in pkgutil.iter_modules(plugins.__path__):
+    module = importlib.import_module(f"plugins.{module_name}")
+    all_connectors[module_name] = module
+
+PROXY = settings.PROXY
+DAYS_BEFORE_REVIEW = settings.DAYS_BEFORE_REVIEW
+AUTO_STATS_REGENERATION = settings.AUTO_STATS_REGENERATION
+
+# This function is called after a user logs in
+@receiver(user_logged_in)
+def user_logged_in_receiver(sender, request, user, **kwargs):
+    # check if there is an update available and add a notification if applicable
+    if is_update_available():
+        del_notification_by_uid("update_available_deephunter")
+        add_info_notification("An update is available for DeepHunter. Use the upgrade script to do the update.", uid="update_available_deephunter")
+    else:
+        # remove all notifications related to deephunter update
+        del_notification_by_uid("update_available_deephunter")
+
+    # check if MITRE version is updated and add a notification if applicable
+    if is_mitre_update_available():
+        del_notification_by_uid("update_available_mitre")
+        add_info_notification("MITRE ATT&CK has been updated. Use the consistency check script to update your mapping.", uid="update_available_mitre")
+    else:
+        # remove all notifications related to MITRE update
+        del_notification_by_uid("update_available_mitre")
+
+    # checks the token expiration for all connectors and add a notification if applicable
+    for connector in all_connectors.values():
+        # only make the check if plugin is enabled and method get_token_expiration() exists
+        connector_name = connector.__name__.split('.')[1]
+        if is_connector_enabled(connector_name) and hasattr(connector, 'get_token_expiration'):
+            expires_in = connector.get_token_expiration()
+            # check if function returns a number
+            if isinstance(expires_in, (int, float)):
+                # delete previous message and create new one with updated #days before expiration
+                del_notification_by_uid(f"tokenexpires_{connector_name}")
+                if expires_in <= 0:
+                    add_error_notification(f"Token for {connector_name} has expired.", uid=f"tokenexpires_{connector_name}")
+                elif expires_in <= 7:
+                    add_warning_notification(f"Token for {connector_name} expires in {expires_in} days.", uid=f"tokenexpires_{connector_name}")
+            else:
+                # remove notifications related to token expiration for the connector
+                del_notification_by_uid(f"tokenexpires_{connector_name}")
+
+# This function is already defined in the views, but expects the request param that is not available in the signal handler.
+# So we cloned this function here so that it can be called from the signal handler.
+def regenerate_analytic_stats(analytic):
+    # sleep 1 second to make sure the task is not started immediately
+    # unless we do that, the task fails for newly created analytics
+    time.sleep(1)
+
+    # start the celery task (defined in qm/tasks.py)
+    taskid = regenerate_stats.delay(analytic.id)
+    
+    # Create task in TasksStatus object
+    celery_status = TasksStatus(
+        taskname=analytic.name,
+        taskid = taskid
+    )
+    celery_status.save()
+
+# This handler is triggered before an "Analytic" object is saved (pre_save when created or updated)
+@receiver(pre_save, sender=Analytic)
+def pre_save_handler(sender, instance, **kwargs):
+    
+    # Check if the instance is being updated (i.e., it's not a new object)
+    if instance.pk:
+        # Retrieve the current value of the field from the database
+        original_instance = Analytic.objects.get(pk=instance.pk)
+
+        # Ensure AnalyticMeta exists (handles analytics created before AnalyticMeta was introduced)
+        AnalyticMeta.objects.get_or_create(analytic=instance)
+
+        ### Reset counters, error flag and message, and last_time_seen when the "query" field of the analytic is updated
+        ### or when zscore thresholds are updated
+        if (original_instance.query != instance.query
+        or original_instance.anomaly_threshold_count != instance.anomaly_threshold_count
+        or original_instance.anomaly_threshold_endpoints != instance.anomaly_threshold_endpoints):
+            # reset query flag
+            instance.analyticmeta.maxhosts_count = 0
+            instance.analyticmeta.query_error = False
+            instance.analyticmeta.query_error_message = ''
+            instance.analyticmeta.query_error_date = None
+            instance.analyticmeta.last_time_seen = None
+            # we save a flag for the post_save handler to know if the query was changed (used for stats regeneration in post_save handler)
+            instance._query_changed = True
+            # Workflow automation: if status is PENDING and query is changed, analytic status automatically set to DRAFT
+            if original_instance.query != instance.query and instance.status == 'PENDING':
+                instance.status = 'DRAFT'
+
+        # Only apply if "need_to_sync_rule" function returns True (defined in the connector settings)
+        connector_module = all_connectors.get(instance.connector.name) if instance.connector else None
+        if connector_module and connector_module.need_to_sync_rule():
+
+            # If create_rule flag was initially set
+            if original_instance.create_rule:
+                if instance.create_rule:
+                    if original_instance.query != instance.query:
+                        connector_module.update_rule(instance)
+                else:
+                    connector_module.delete_rule(instance)
+            
+            else:
+                # if the updated analytic has the create_rule flag set while it was not set before,
+                # we need to create the remote rule associated with the analytic
+                if instance.create_rule:
+                    connector_module.create_rule(instance)
+
+        # Set the next review date if the analytic is published
+        if instance.status == 'PUB':
+            # if the analytic is locked, we remove the next review date
+            if instance.run_daily_lock:
+                instance.analyticmeta.next_review_date = None
+            else:
+                # we only set the next review date if the query was changed or if the status was not PUB before
+                if original_instance.query != instance.query or original_instance.status != 'PUB':
+                    instance.analyticmeta.next_review_date = datetime.now().date() + timedelta(days=DAYS_BEFORE_REVIEW)
+
+        # Bug #316 - Remove next review date from analytics that are no longer in PUB status
+        if original_instance.status == 'PUB' and instance.status != 'PUB':
+            instance.analyticmeta.next_review_date = None
+
+        # Save changes to AnalyticMeta
+        instance.analyticmeta.save()
+
+    # For "newly" created analytic
+    else:
+        
+        # Only apply if "need_to_sync_rule" function returns True (defined in the connector settings)
+        connector_module = all_connectors.get(instance.connector.name) if instance.connector else None
+        if connector_module and connector_module.need_to_sync_rule():
+            # if the create_rule flag is set, we need to create the remote rule associated with the analytic
+            if instance.create_rule:
+                connector_module.create_rule(instance)
+
+    # When analytic is archived or pending, automatically remove the run_daily flag
+    if instance.status == 'ARCH' or instance.status == 'PENDING':
+        instance.run_daily = False
+    
+    # If run_daily_lock is set, run_daily should automatically be set
+    if instance.run_daily_lock and not instance.run_daily:
+        instance.run_daily = True
+
+# This handler is triggered after an "Analytic" object is saved
+@receiver(post_save, sender=Analytic)
+def post_save_handler(sender, instance, created, **kwargs):
+
+    if created:
+        # for new analytics, we create the AnalyticMeta object associated with the analytic
+        AnalyticMeta.objects.get_or_create(analytic=instance)
+
+        # Workflow. Set the next review date if the analytic is published
+        if instance.status == 'PUB':
+            # if the analytic is locked, we do not set the next review date
+            if instance.run_daily_lock:
+                instance.analyticmeta.next_review_date = None
+            else:
+                instance.analyticmeta.next_review_date = datetime.now().date() + timedelta(days=DAYS_BEFORE_REVIEW)
+
+    # Ensure AnalyticMeta exists before accessing it
+    meta, _ = AnalyticMeta.objects.get_or_create(analytic=instance)
+
+    # When analytic is archived, set the next_review_date to None
+    if instance.status == 'ARCH':
+        meta.next_review_date = None
+
+    # Save changes to AnalyticMeta
+    meta.save()
+
+    if created:
+        # New analytics
+        if AUTO_STATS_REGENERATION:
+            regenerate_analytic_stats(instance)
+    else:
+        # for updated analytics, we check the flag set by the pre_save handler
+        if getattr(instance, '_query_changed', False):
+            if AUTO_STATS_REGENERATION:
+                regenerate_analytic_stats(instance)
+
+
+# This handler is triggered after an "Analytic" object is deleted
+@receiver(post_delete, sender=Analytic)
+def post_delete_handler(sender, instance, **kwargs):
+
+    # Only apply if "need_to_sync_rule" function returns True, for the connector of the analytic
+    connector_module = all_connectors.get(instance.connector.name) if instance.connector else None
+    if connector_module and connector_module.need_to_sync_rule():
+        
+        # only apply if create_rule flag set
+        if instance.create_rule:
+            # call the "delete_rule" function of the connector
+            connector_module.delete_rule(instance)

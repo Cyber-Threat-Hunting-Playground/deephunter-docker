@@ -1,0 +1,66 @@
+# Example cron jobs for DeepHunter Docker deployment
+# Install: crontab -e
+# Then add the relevant lines below
+
+# Change to your installation directory
+DEEPHUNTER_DIR=/home/Cyber-Threat-Hunting-Playground/deephunter-docker
+
+# ==========================================
+# Daily Backup at 2 AM
+# ==========================================
+0 2 * * * cd $DEEPHUNTER_DIR && make backup >> $DEEPHUNTER_DIR/data/logs/backup.log 2>&1
+
+# ==========================================
+# Weekly Full Backup at 3 AM on Sundays
+# ==========================================
+0 3 * * 0 cd $DEEPHUNTER_DIR && make backup BACKUP_RETENTION_DAYS=90 >> $DEEPHUNTER_DIR/data/logs/backup-weekly.log 2>&1
+
+# ==========================================
+# Health Check Every 15 Minutes
+# ==========================================
+*/15 * * * * cd $DEEPHUNTER_DIR && make health >> $DEEPHUNTER_DIR/data/logs/health.log 2>&1
+
+# ==========================================
+# Container Restart if Unhealthy (Every Hour)
+# ==========================================
+0 * * * * cd $DEEPHUNTER_DIR && docker ps --filter "name=deephunter" --filter "health=unhealthy" -q | xargs -r docker restart
+
+# ==========================================
+# Clean Old Logs (Weekly at 4 AM on Sundays)
+# ==========================================
+0 4 * * 0 find $DEEPHUNTER_DIR/data/logs -name "*.log" -type f -mtime +30 -delete
+
+# ==========================================
+# Disk Space Alert (Daily at 6 AM)
+# ==========================================
+0 6 * * * USAGE=$(df -h $DEEPHUNTER_DIR | awk 'NR==2 {print $5}' | sed 's/%//'); if [ $USAGE -gt 80 ]; then echo "Warning: Disk usage is ${USAGE}%" | mail -s "DeepHunter Disk Alert" admin@example.com; fi
+
+# ==========================================
+# Monitor Resource Usage (Every 6 Hours)
+# ==========================================
+0 */6 * * * cd $DEEPHUNTER_DIR && docker stats --no-stream >> $DEEPHUNTER_DIR/data/logs/resources.log 2>&1
+
+# ==========================================
+# Export Container Logs Weekly
+# ==========================================
+0 5 * * 0 cd $DEEPHUNTER_DIR && docker-compose logs --tail=1000 > $DEEPHUNTER_DIR/data/logs/containers-$(date +\%Y\%m\%d).log 2>&1
+
+# ==========================================
+# Update Check (Weekly at 1 AM on Mondays)
+# ==========================================
+# Uncomment if you want automatic updates (NOT RECOMMENDED without testing)
+# 0 1 * * 1 cd $DEEPHUNTER_DIR && make update >> $DEEPHUNTER_DIR/data/logs/update.log 2>&1
+
+# ==========================================
+# Generate Diagnostics if Issues Detected
+# ==========================================
+*/30 * * * * cd $DEEPHUNTER_DIR && ! docker ps --filter "name=deephunter-app" --filter "health=healthy" -q | grep -q . && make diagnostics
+
+# ==========================================
+# Notes:
+# ==========================================
+# - Adjust paths and email addresses as needed
+# - Ensure cron has access to Docker commands
+# - Test each job individually before enabling
+# - Check logs in data/logs/ directory
+# - Consider log rotation for cron job outputs

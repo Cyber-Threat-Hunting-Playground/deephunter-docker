@@ -1,0 +1,101 @@
+<div id="ai_debug_log">
+    <h2>AI Query Debug Log</h2>
+    <p>Recent queries sent to AI-tagged connectors (MITRE suggestions and query assistant). Showing up to 200 entries.</p>
+
+    <form style="margin-bottom: 15px; display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;"
+          hx-get="/config/ai-debug-log/"
+          hx-target="#ai_debug_log"
+          hx-swap="outerHTML">
+        <div>
+            <label for="filter_connector" style="display:block; font-size:12px; margin-bottom:2px;">Connector</label>
+            <select id="filter_connector" name="connector">
+                <option value="">All</option>
+                {% for c in connector_choices %}
+                    <option value="{{ c }}" {% if c == f_connector %}selected{% endif %}>{{ c }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="filter_action" style="display:block; font-size:12px; margin-bottom:2px;">Action</label>
+            <select id="filter_action" name="action">
+                <option value="">All</option>
+                {% for val, label in action_choices %}
+                    <option value="{{ val }}" {% if val == f_action %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="filter_success" style="display:block; font-size:12px; margin-bottom:2px;">Status</label>
+            <select id="filter_success" name="success">
+                <option value="">All</option>
+                <option value="1" {% if f_success == "1" %}selected{% endif %}>Success</option>
+                <option value="0" {% if f_success == "0" %}selected{% endif %}>Error</option>
+            </select>
+        </div>
+        <div>
+            <button type="submit" class="button">Filter</button>
+        </div>
+    </form>
+
+    {% if logs %}
+        <table class="mitre" style="width: 100%; table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 140px;">Time</th>
+                    <th style="width: 90px;">User</th>
+                    <th style="width: 80px;">Connector</th>
+                    <th style="width: 110px;">Action</th>
+                    <th>Input</th>
+                    <th>Output</th>
+                    <th style="width: 60px;">Status</th>
+                    <th style="width: 70px;">Duration</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                    <tr{% if not log.success %} style="background-color: #fff0f0;"{% endif %}>
+                        <td style="white-space: nowrap; font-size: 12px;">{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                        <td>{% if log.user %}{{ log.user.username }}{% else %}&mdash;{% endif %}</td>
+                        <td>{{ log.connector_name }}</td>
+                        <td>{{ log.get_action_display }}</td>
+                        <td>
+                            <details>
+                                <summary style="cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;">
+                                    {{ log.input_text|truncatechars:60 }}
+                                </summary>
+                                <pre style="white-space: pre-wrap; word-break: break-word; font-size: 12px; margin-top: 5px; max-height: 200px; overflow: auto;">{{ log.input_text }}</pre>
+                            </details>
+                        </td>
+                        <td>
+                            {% if log.success %}
+                                <details>
+                                    <summary style="cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;">
+                                        {{ log.output_text|truncatechars:60 }}
+                                    </summary>
+                                    <pre style="white-space: pre-wrap; word-break: break-word; font-size: 12px; margin-top: 5px; max-height: 200px; overflow: auto;">{{ log.output_text }}</pre>
+                                </details>
+                            {% else %}
+                                <details>
+                                    <summary style="cursor:pointer; color: #dc3545; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;">
+                                        {{ log.error_message|truncatechars:60 }}
+                                    </summary>
+                                    <pre style="white-space: pre-wrap; word-break: break-word; font-size: 12px; margin-top: 5px; color: #dc3545; max-height: 200px; overflow: auto;">{{ log.error_message }}</pre>
+                                </details>
+                            {% endif %}
+                        </td>
+                        <td style="text-align: center;">
+                            {% if log.success %}
+                                <span style="color: #28a745;" title="Success">&#10003;</span>
+                            {% else %}
+                                <span style="color: #dc3545;" title="Error">&#10007;</span>
+                            {% endif %}
+                        </td>
+                        <td style="text-align: right; white-space: nowrap;">{{ log.duration_ms }} ms</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No AI query logs found{% if f_connector or f_action or f_success %} matching the current filters{% endif %}.</p>
+    {% endif %}
+</div>

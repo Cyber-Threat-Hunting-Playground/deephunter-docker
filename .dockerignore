@@ -1,0 +1,58 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+README.docker.txt
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Data directories (mounted as volumes)
+data/mariadb
+data/redis
+data/backups
+data/logs
+
+# Build artifacts
+*.pyc
+__pycache__
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.cache
+
+# Release tarballs — keep v*.tar.gz so offline/corporate builds work
+# resources/*.tar.gz
+
+# Private keys and stray certificates (resources/root_ca/ is explicitly COPYed by Dockerfile)
+*.key
+*.pem
+*.p12
+*.pfx

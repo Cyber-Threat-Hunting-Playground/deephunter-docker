@@ -1,0 +1,73 @@
+name: DeepHunter Docker CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Validate Docker Compose
+        run: docker-compose config --quiet
+      
+      - name: Check Shell Scripts
+        run: |
+          find scripts/ -name "*.sh" -exec shellcheck {} + || true
+      
+      - name: Validate Dockerfile
+        run: docker build --no-cache -t deephunter:test .
+
+  test:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Create .env file
+        run: cp .env.example .env
+      
+      - name: Start services
+        run: docker-compose up -d
+      
+      - name: Wait for services
+        run: sleep 30
+      
+      - name: Check service health
+        run: |
+          docker ps
+          docker logs deephunter-app || true
+          docker logs deephunter-mariadb || true
+      
+      - name: Test database connection
+        run: docker exec deephunter-mariadb mysqladmin ping
+      
+      - name: Test Redis connection
+        run: docker exec deephunter-redis redis-cli PING
+      
+      - name: Cleanup
+        if: always()
+        run: docker-compose down -v
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'

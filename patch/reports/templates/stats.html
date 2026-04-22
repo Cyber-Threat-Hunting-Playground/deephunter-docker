@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% load l10n %}
+
+{% block style %}
+	<link rel="stylesheet" href="/static/css/stats.css" />
+{% endblock %}
+{% block js %}
+	<script src="/static/canvasjs/jquery.canvasjs.min.js"></script>
+{% endblock %}
+
+{% block body %}
+<!--h1>Stats campaigns last {{ db_retention }} days</h1-->
+
+<div id="chartContainer_count_analytics" class="chartcontainer"></div>
+<div id="chartContainer_duration" class="chartcontainer"></div>
+<div id="chartContainer_count_endpoints" class="chartcontainer"></div>
+
+<script nonce="fgd56sh1bc">
+window.onload = function () {
+
+	var options_count_analytics = {
+		animationEnabled: false,
+		axisX:{
+			valueFormatString: "DD MMM"
+		},
+		axisY:{
+			title: "#threat hunting analytics",
+			titlePadding: 10,
+			minimum: 0
+		},
+		toolTip:{
+			shared:true
+		},
+		title:{
+			text: "Count of threat hunting analytics run in campaigns",
+			fontFamily: "arial"
+		},
+		data: [
+			{% for connector, data in connector_stats.items %}
+				{
+					type: "stackedColumn",
+					showInLegend: true,
+					name: "{{ connector }}",
+					dataPoints: [
+						{% for i in data %}
+							{{ connector_stats.connector }}
+							{ y: {{ i.count }}, x: new Date("{{ i.date|date:"Y-m-d" }}") }{% if not forloop.last %},{% endif %}
+						{% endfor %}
+					]
+				}{% if not forloop.last %},{% endif %}
+			{% endfor %}
+		]
+	};
+
+	var options_duration = {
+		animationEnabled: false,
+		axisX:{
+			valueFormatString: "DD MMM"
+		},
+		axisY:{
+			title: "runtime (minutes)",
+			titlePadding: 10,
+			minimum: 0
+		},
+		toolTip:{
+			shared:true
+		},
+		title:{
+			text: "Run time duration (in minutes) of campaigns",
+			fontFamily: "arial"
+		},
+		data: [
+		{
+			type: "column",
+			showInLegend: true,
+			name: "duration (minutes)",
+			markerType: "square",
+			xValueFormatString: "DD MMM, YYYY",
+			color: "#2596be",
+			yValueFormatString: "#,##0",
+			dataPoints: [
+				{% localize off %}
+				{% for s in stats %}
+					{ x: new Date("{{ s.date|date:"Y-m-d" }}"), y: {{ s.duration }} },
+				{% endfor %}
+				{% endlocalize %}
+			]
+		}
+		]
+	};
+
+	var options_count_endpoints = {
+		animationEnabled: false,
+		axisX:{
+			valueFormatString: "DD MMM"
+		},
+		axisY:{
+			title: "#endpoints",
+			titlePadding: 10,
+			minimum: 0
+		},
+		toolTip:{
+			shared:true
+		},
+		title:{
+			text: "Number of endpoints per day",
+			fontFamily: "arial"
+		},
+		data: [
+		{
+			type: "column",
+			showInLegend: true,
+			name: "#endpoints",
+			markerType: "square",
+			xValueFormatString: "DD MMM, YYYY",
+			color: "#2596be",
+			yValueFormatString: "#,##0",
+			dataPoints: [
+				{% for s in stats %}
+					{ x: new Date("{{ s.date|date:"Y-m-d" }}"), y: {{ s.count_endpoints_total }} },
+				{% endfor %}
+			]
+		}
+		]
+	};
+
+	$("#chartContainer_count_analytics").CanvasJSChart(options_count_analytics);
+	$("#chartContainer_duration").CanvasJSChart(options_duration);
+	$("#chartContainer_count_endpoints").CanvasJSChart(options_count_endpoints);
+
+}
+</script>
+<!--Query executed in {{ elapsed_time|floatformat:2 }} seconds.-->
+{% endblock %}

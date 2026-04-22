@@ -1,0 +1,40 @@
+# Environment variables
+.env
+
+# Data directories
+data/mariadb/
+data/redis/
+data/logs/
+data/backups/
+
+# Docker
+#.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+.cache
+
+# Pre-downloaded release tarballs (large binaries, do not commit)
+resources/*.tar.gz
+
+# Private Root CA certificates (place locally before building, do not commit)
+resources/root_ca/*.crt
+
+# Git hooks (use .githooks/ instead)
+.git/hooks/
+
+# Forbidden patterns (use .githooks/forbidden-patterns.txt.example as template)
+.githooks/forbidden-patterns.txt

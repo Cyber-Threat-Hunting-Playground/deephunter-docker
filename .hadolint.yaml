@@ -1,0 +1,8 @@
+# Hadolint configuration
+# https://github.com/hadolint/hadolint#configure
+
+ignored:
+  # DL3008: Pin versions in apt-get install
+  # We intentionally use unversioned packages from debian:bookworm-slim
+  # to always get the latest security patches on rebuild.
+  - DL3008

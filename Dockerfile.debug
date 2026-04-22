@@ -1,0 +1,17 @@
+# Security hardening configuration for DeepHunter Dockerfile
+# Additional debug tools (comment out in production for minimal image)
+
+FROM debian:bookworm-slim AS debug
+
+# Install debug tools (optional - only for development/troubleshooting)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        iputils-ping \
+        iproute2 \
+        telnet \
+        procps \
+        strace \
+        vim \
+        less && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/*

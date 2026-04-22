@@ -1,0 +1,151 @@
+version: '3'
+
+# Production-optimized docker-compose configuration
+# Copy this to docker-compose.yml and adjust as needed
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: deephunter-redis-prod
+    restart: always
+    networks:
+      - backend
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mariadb:
+    image: mariadb:lts
+    container_name: deephunter-mariadb-prod
+    restart: always
+    networks:
+      - backend
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./backup:/backup:ro
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-deephunter}
+      MARIADB_USER: ${MARIADB_USER:-deephunter}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      MYSQL_INITDB_SKIP_TZINFO: 1
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=500
+      --innodb_buffer_pool_size=1G
+      --innodb_log_file_size=256M
+      --innodb_flush_log_at_trx_commit=2
+      --query_cache_size=0
+      --query_cache_type=0
+      --slow_query_log=1
+      --slow_query_log_file=/var/log/mysql/slow.log
+      --long_query_time=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  deephunter:
+    image: deephunter:latest
+    container_name: deephunter-app-prod
+    restart: always
+    networks:
+      - backend
+    volumes:
+      - ./data/settings.py:/data/deephunter/deephunter/settings.py:ro
+      - app-logs:/var/log/deephunter
+      - app-static:/data/deephunter/static
+      - ./data/backups:/data/backups
+    ports:
+      - "${DEEPHUNTER_PORT:-9000}:443"
+    environment:
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=${MARIADB_DATABASE:-deephunter}
+      - DB_USER=${MARIADB_USER:-deephunter}
+      - DB_PASSWORD=${MARIADB_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DJANGO_SETTINGS_MODULE=deephunter.settings
+    depends_on:
+      redis:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -k https://localhost:443/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis-data:
+    driver: local
+  mariadb-data:
+    driver: local
+  app-logs:
+    driver: local
+  app-static:
+    driver: local
