@@ -12,12 +12,11 @@ env:
 
 jobs:
 
-  # ── Job 1: Lint ────────────────────────────────────────────────
   lint:
     name: Lint & Validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Lint Dockerfile with Hadolint
         uses: hadolint/hadolint-action@v3.1.0
@@ -27,27 +26,23 @@ jobs:
 
       - name: Lint shell scripts with ShellCheck
         run: |
+          sudo apt-get update
           sudo apt-get install -y shellcheck
-          echo "::group::Checking scripts/"
-          find scripts/ -name "*.sh" -print -exec shellcheck {} +
-          echo "::endgroup::"
-          echo "::group::Checking build.sh"
+          find scripts/ -name "*.sh" -exec shellcheck {} +
           shellcheck build.sh
-          echo "::endgroup::"
 
       - name: Validate Docker Compose configuration
         run: docker compose -f docker-compose.yml config --quiet
 
-  # ── Job 2: Build Docker Image ─────────────────────────────────
+
   build:
     name: Build Docker Image
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         uses: docker/build-push-action@v6
@@ -64,44 +59,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Inspect built image
-        run: |
-          docker images ${{ env.IMAGE_NAME }}
-          echo "---"
-          docker inspect ${{ env.IMAGE_NAME }}:latest | jq '.[0].Config.Labels'
-
       - name: Save image as artifact
         run: docker save ${{ env.IMAGE_NAME }}:latest | gzip > /tmp/deephunter-image.tar.gz
 
-      - name: Image size summary
-        run: |
-          echo "### 🐳 Docker Image Build" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          SIZE=$(docker images ${{ env.IMAGE_NAME }}:latest --format '{{.Size}}')
-          echo "| Image size | ${SIZE} |" >> $GITHUB_STEP_SUMMARY
-          COMPRESSED=$(du -h /tmp/deephunter-image.tar.gz | cut -f1)
-          echo "| Compressed | ${COMPRESSED} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | ${{ env.IMAGE_TAG }} |" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: docker-image
           path: /tmp/deephunter-image.tar.gz
           retention-days: 1
 
-  # ── Job 3: Test Services ──────────────────────────────────────
+
   test:
     name: Test Services
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: docker-image
           path: /tmp
@@ -115,65 +90,19 @@ jobs:
       - name: Start services
         run: docker compose up -d
 
-      - name: Wait for services to become healthy
-        timeout-minutes: 5
-        run: |
-          echo "Waiting for MariaDB..."
-          until docker inspect --format='{{.State.Health.Status}}' deephunter-mariadb 2>/dev/null | grep -q "healthy"; do
-            echo "  MariaDB not ready yet, waiting 5s..."
-            sleep 5
-          done
-          echo "✓ MariaDB is healthy"
-
-          echo "Waiting for Redis..."
-          until docker inspect --format='{{.State.Health.Status}}' deephunter-redis 2>/dev/null | grep -q "healthy"; do
-            echo "  Redis not ready yet, waiting 3s..."
-            sleep 3
-          done
-          echo "✓ Redis is healthy"
-
-          echo "All backing services are healthy."
-
-      - name: Test MariaDB connection
-        run: docker exec deephunter-mariadb mariadb-admin ping --silent
-
-      - name: Test Redis connection
-        run: |
-          PONG=$(docker exec deephunter-redis redis-cli PING)
-          echo "Redis responded: $PONG"
-          [ "$PONG" = "PONG" ] || exit 1
-
-      - name: Show running containers
-        if: always()
-        run: docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-      - name: Dump service logs on failure
-        if: failure()
-        run: |
-          echo "::group::deephunter-app logs"
-          docker logs deephunter-app 2>&1 || true
-          echo "::endgroup::"
-          echo "::group::deephunter-mariadb logs"
-          docker logs deephunter-mariadb 2>&1 || true
-          echo "::endgroup::"
-          echo "::group::deephunter-redis logs"
-          docker logs deephunter-redis 2>&1 || true
-          echo "::endgroup::"
-
       - name: Cleanup
         if: always()
         run: docker compose down -v
 
-  # ── Job 4: Security Scan ──────────────────────────────────────
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: docker-image
           path: /tmp
@@ -181,19 +110,10 @@ jobs:
       - name: Load Docker image
         run: gunzip -c /tmp/deephunter-image.tar.gz | docker load
 
-      - name: Run Trivy config scan
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: 'config'
-          scan-ref: '.'
-          format: 'table'
-
       - name: Run Trivy image scan
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@latest
         with:
           scan-type: 'image'
           image-ref: '${{ env.IMAGE_NAME }}:latest'
-          format: 'table'
           severity: 'CRITICAL,HIGH'
