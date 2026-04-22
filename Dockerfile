@@ -32,9 +32,11 @@ RUN chmod 755 /resources/installer-v2.5-docker.sh && \
     /resources/installer-v2.5-docker.sh
 
 # Install REST API v2 dependencies at build time (avoids runtime pip + network)
+# Authlib >=1.6.9 fixes CVE-2026-27962 (JWK Header Injection, CRITICAL)
 RUN /data/venv/bin/pip install --no-cache-dir \
     djangorestframework==3.16.0 \
-    drf-spectacular==0.28.0
+    drf-spectacular==0.28.0 \
+    'authlib>=1.6.9'
 
 # Enable plugins (symlink from catalog/ into the plugins package root)
 WORKDIR /data/deephunter/plugins

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Security
+- **Authlib upgraded to >=1.6.9** — fixes CVE-2026-27962 (CRITICAL: JWK Header Injection authentication bypass).
+- **`.trivyignore` added** — acknowledges CVE-2025-7458 (libsqlite3-0, no Debian 12 fix, SQLite unused at runtime) and CVE-2023-45853 (zlib1g minizip, Debian will_not_fix).
+
+### Fixed
+- **SARIF upload in CI** — added `actions: read` permission to the `security-scan` job and upgraded `codeql-action` from v3 to v4 to fix "Resource not accessible by integration" errors.
+
 ### Added
 - **Docker Hub publishing pipeline** — GitHub Actions workflow now builds, tests, scans, publishes to Docker Hub, signs the image with cosign (keyless via GitHub OIDC), and attaches a CycloneDX SBOM on version tag pushes (`v*`).
 - **Image signing with cosign** — every published image is signed using Sigstore keyless signing; consumers can verify provenance with `cosign verify`.

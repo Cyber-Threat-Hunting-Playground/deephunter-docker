@@ -1,0 +1,11 @@
+# Trivy ignore list — unfixable CVEs in the Debian bookworm base image.
+# Reviewed: 2026-04-22. Re-evaluate when upgrading the base image.
+
+# libsqlite3-0: integer overflow — no fix available in Debian 12 (status: affected)
+# DeepHunter uses MariaDB as its primary database; SQLite is not used at runtime.
+CVE-2025-7458
+
+# zlib1g: integer overflow in minizip's zipOpenNewFileInZip4_64 —
+# Debian marks this will_not_fix; the vulnerable function is in the minizip
+# contrib code, not in the core zlib compression library used at runtime.
+CVE-2023-45853

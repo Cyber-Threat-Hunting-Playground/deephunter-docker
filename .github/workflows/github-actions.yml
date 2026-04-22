@@ -127,6 +127,7 @@ jobs:
     needs: build
     permissions:
       contents: read
+      actions: read
       security-events: write
     steps:
       - uses: actions/checkout@v5
@@ -146,6 +147,7 @@ jobs:
           image-ref: '${{ env.IMAGE_NAME }}:latest'
           severity: 'CRITICAL'
           exit-code: '1'
+          trivyignores: '.trivyignore'
 
       - name: Run Trivy vulnerability scanner (HIGH — warn)
         if: always()
@@ -157,10 +159,11 @@ jobs:
           severity: 'HIGH'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          trivyignores: '.trivyignore'
 
       - name: Upload Trivy SARIF to GitHub Security
         if: always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
 
