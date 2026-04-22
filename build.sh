@@ -68,24 +68,21 @@ fi
 
 # Build the image
 echo -e "${BLUE}Building Docker image...${NC}"
-docker build \
+if docker build \
     --build-arg GITHUB_REPO="${GITHUB_REPO}" \
     --build-arg DEEPHUNTER_VERSION="${DEEPHUNTER_VERSION}" \
     --build-arg BUILD_DATE="${BUILD_DATE}" \
     --build-arg VCS_REF="${VCS_REF}" \
-    --tag ${IMAGE_NAME}:${VERSION} \
-    --tag ${IMAGE_NAME}:${DEEPHUNTER_VERSION} \
-    ./
-
-# Check if build was successful
-if [ $? -eq 0 ]; then
+    --tag "${IMAGE_NAME}:${VERSION}" \
+    --tag "${IMAGE_NAME}:${DEEPHUNTER_VERSION}" \
+    ./; then
     echo ""
     echo -e "${GREEN}==================================="
     echo "Build completed successfully!"
     echo -e "===================================${NC}"
     echo ""
     echo "Images created:"
-    docker images | grep ${IMAGE_NAME} | head -n 2
+    docker images | grep "${IMAGE_NAME}" | head -n 2
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"
     echo "1. Configure .env file: cp .env.example .env"
