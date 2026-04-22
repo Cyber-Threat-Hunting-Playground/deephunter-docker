@@ -543,8 +543,3 @@ For issues related to:
 - [Docker Compose Documentation](https://docs.docker.com/compose/)
 - [MariaDB Documentation](https://mariadb.com/kb/en/)
 - [Redis Documentation](https://redis.io/documentation)
-
----
-
-**Version:** 2.5  
-**Last Updated:** December 2025
