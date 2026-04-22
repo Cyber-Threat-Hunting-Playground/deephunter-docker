@@ -16,7 +16,6 @@ RESTORE_DIR="/tmp/deephunter_restore_$$"
 
 # Container names
 DB_CONTAINER="deephunter-mariadb"
-APP_CONTAINER="deephunter-app"
 
 echo -e "${BLUE}==================================="
 echo "DeepHunter Restore Script"
@@ -70,11 +69,9 @@ echo -e "${GREEN}✓ Application stopped${NC}"
 
 echo -e "${BLUE}Step 3/4: Restoring database...${NC}"
 # Restore database
-docker exec -i "${DB_CONTAINER}" mariadb \
+if docker exec -i "${DB_CONTAINER}" mariadb \
     -u root -p"${MARIADB_ROOT_PASSWORD:-password}" \
-    < "${RESTORE_DIR}/${BACKUP_NAME}/database.sql"
-
-if [ $? -eq 0 ]; then
+    < "${RESTORE_DIR}/${BACKUP_NAME}/database.sql"; then
     echo -e "${GREEN}✓ Database restore completed${NC}"
 else
     echo -e "${RED}✗ Database restore failed${NC}"
