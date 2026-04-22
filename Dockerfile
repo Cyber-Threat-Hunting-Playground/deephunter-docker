@@ -113,14 +113,16 @@ ARG DEEPHUNTER_VERSION=2.5
 ARG BUILD_DATE
 ARG VCS_REF
 
-LABEL maintainer="deephunter" \
-      org.label-schema.build-date="${BUILD_DATE}" \
-      org.label-schema.name="deephunter" \
-      org.label-schema.description="DeepHunter Security Analytics Platform" \
-      org.label-schema.version="${DEEPHUNTER_VERSION}" \
-      org.label-schema.vcs-url="https://github.com/${GITHUB_REPO}" \
-      org.label-schema.vcs-ref="${VCS_REF}" \
-      org.label-schema.schema-version="1.0"
+LABEL org.opencontainers.image.title="DeepHunter" \
+      org.opencontainers.image.description="DeepHunter Security Analytics Platform" \
+      org.opencontainers.image.version="${DEEPHUNTER_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/${GITHUB_REPO}" \
+      org.opencontainers.image.url="https://hub.docker.com/r/cyberthreatplayground/deephunter-docker" \
+      org.opencontainers.image.documentation="https://github.com/Cyber-Threat-Hunting-Playground/deephunter-docker" \
+      org.opencontainers.image.vendor="Cyber Threat Hunting Playground" \
+      org.opencontainers.image.licenses="MIT"
 
 # Copy application and data from builder
 COPY --from=builder /data /data

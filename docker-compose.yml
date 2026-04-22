@@ -57,7 +57,7 @@ services:
         max-file: "3"
 
   deephunter:
-    image: deephunter:latest
+    image: ${DEEPHUNTER_IMAGE:-deephunter:latest}
     container_name: deephunter-app
     restart: unless-stopped
     networks:

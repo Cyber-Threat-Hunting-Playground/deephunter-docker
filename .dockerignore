@@ -2,6 +2,12 @@
 .git
 .gitignore
 .gitattributes
+.githooks
+
+# CI/CD and project tooling
+.github
+examples
+Makefile
 
 # Documentation
 *.md
@@ -9,8 +15,15 @@ README.docker.txt
 
 # Docker files
 Dockerfile
+Dockerfile.debug
 docker-compose.yml
+docker-compose.dev.yml
 .dockerignore
+
+# Environment and license (not needed in build context)
+.env
+.env.example
+LICENSE
 
 # Data directories (mounted as volumes)
 data/mariadb

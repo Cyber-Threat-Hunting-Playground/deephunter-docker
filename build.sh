@@ -19,7 +19,9 @@ if [ -f .env ]; then
 fi
 
 # Configuration
-IMAGE_NAME="deephunter"
+DOCKER_REGISTRY="${DOCKER_REGISTRY:-}"
+IMAGE_NAME="${IMAGE_NAME:-deephunter}"
+FULL_IMAGE="${DOCKER_REGISTRY:+${DOCKER_REGISTRY}/}${IMAGE_NAME}"
 VERSION="${VERSION:-latest}"
 GITHUB_REPO="${GITHUB_REPO:-cyber-threat-hunting-playground/deephunter}"
 DEEPHUNTER_VERSION="${DEEPHUNTER_VERSION:-2.5}"
@@ -30,7 +32,7 @@ echo -e "${BLUE}==================================="
 echo "DeepHunter Docker Build Script"
 echo -e "===================================${NC}"
 echo ""
-echo "Image: ${IMAGE_NAME}:${VERSION}"
+echo "Image: ${FULL_IMAGE}:${VERSION}"
 echo "Repo:  ${GITHUB_REPO} @ v${DEEPHUNTER_VERSION}"
 echo "Build Date: ${BUILD_DATE}"
 echo "VCS Ref: ${VCS_REF}"
@@ -73,8 +75,8 @@ if docker build \
     --build-arg DEEPHUNTER_VERSION="${DEEPHUNTER_VERSION}" \
     --build-arg BUILD_DATE="${BUILD_DATE}" \
     --build-arg VCS_REF="${VCS_REF}" \
-    --tag "${IMAGE_NAME}:${VERSION}" \
-    --tag "${IMAGE_NAME}:${DEEPHUNTER_VERSION}" \
+    --tag "${FULL_IMAGE}:${VERSION}" \
+    --tag "${FULL_IMAGE}:${DEEPHUNTER_VERSION}" \
     ./; then
     echo ""
     echo -e "${GREEN}==================================="
@@ -82,7 +84,7 @@ if docker build \
     echo -e "===================================${NC}"
     echo ""
     echo "Images created:"
-    docker images | grep "${IMAGE_NAME}" | head -n 2
+    docker images | grep "${FULL_IMAGE}" | head -n 2
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"
     echo "1. Configure .env file: cp .env.example .env"

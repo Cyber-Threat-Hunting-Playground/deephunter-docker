@@ -1,4 +1,4 @@
-.PHONY: help build up down restart logs shell db-shell backup restore clean init status health check-requirements validate-config monitor upgrade diagnostics download-deephunter logs-cron setup-hooks
+.PHONY: help build push up down restart logs shell db-shell backup restore clean init status health check-requirements validate-config monitor upgrade diagnostics download-deephunter logs-cron setup-hooks
 
 # Load .env variables (if present) so targets can reference GITHUB_REPO, DEEPHUNTER_VERSION, etc.
 -include .env
@@ -7,6 +7,10 @@ export
 GITHUB_REPO  ?= Cyber-Threat-Hunting-Playground/deephunter
 DEEPHUNTER_VERSION ?= 2.5
 ENABLE_CRON  ?= false
+DOCKER_REGISTRY ?=
+IMAGE_NAME   ?= deephunter
+FULL_IMAGE   := $(if $(DOCKER_REGISTRY),$(DOCKER_REGISTRY)/$(IMAGE_NAME),$(IMAGE_NAME))
+VERSION      ?= latest
 
 # Colors for output
 BLUE := \033[0;34m
@@ -29,6 +33,16 @@ build: ## Build DeepHunter Docker image
 	@echo "$(BLUE)Building DeepHunter image...$(NC)"
 	./build.sh
 	@echo "$(GREEN)Build complete!$(NC)"
+
+push: build ## Push image to Docker Hub (set DOCKER_REGISTRY first)
+	@if [ -z "$(DOCKER_REGISTRY)" ]; then \
+		echo "$(RED)Error: DOCKER_REGISTRY is not set. Example: make push DOCKER_REGISTRY=cyberthreatplayground$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)Pushing $(FULL_IMAGE):$(VERSION) and $(FULL_IMAGE):$(DEEPHUNTER_VERSION) to Docker Hub...$(NC)"
+	docker push $(FULL_IMAGE):$(VERSION)
+	docker push $(FULL_IMAGE):$(DEEPHUNTER_VERSION)
+	@echo "$(GREEN)Push complete!$(NC)"
 
 download-deephunter: ## Download DeepHunter source for offline build (use if build fails at DOWNLOADING DEEPHUNTER)
 	@echo "$(BLUE)Downloading DeepHunter v$(DEEPHUNTER_VERSION) from $(GITHUB_REPO)...$(NC)"

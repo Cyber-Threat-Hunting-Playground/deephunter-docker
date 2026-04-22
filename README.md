@@ -516,6 +516,67 @@ make build
 make up
 ```
 
+## 🐳 Docker Hub
+
+The DeepHunter image is published to Docker Hub at [`cyberthreatplayground/deephunter`](https://hub.docker.com/r/cyberthreatplayground/deephunter).
+
+### Pulling the Image
+
+```bash
+docker pull cyberthreatplayground/deephunter:latest
+```
+
+To use the Docker Hub image instead of building locally, set `DEEPHUNTER_IMAGE` in your `.env`:
+
+```bash
+DEEPHUNTER_IMAGE=cyberthreatplayground/deephunter:2.5
+```
+
+Then `docker compose up -d` will pull from Docker Hub automatically.
+
+### Image Verification
+
+Every release is signed with [cosign](https://github.com/sigstore/cosign) (keyless, via GitHub OIDC) and includes an attached SBOM:
+
+```bash
+# Verify signature
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'github\.com/Cyber-Threat-Hunting-Playground/deephunter-docker' \
+  cyberthreatplayground/deephunter:latest
+
+# Download SBOM
+cosign download sbom cyberthreatplayground/deephunter:latest > sbom.cdx.json
+```
+
+### Publishing (Maintainers)
+
+Images are published automatically by GitHub Actions when a version tag is pushed:
+
+```bash
+git tag v2.5.1
+git push origin v2.5.1
+```
+
+The CI pipeline will lint, build, test, security-scan, publish to Docker Hub, sign the image, and attach an SBOM.
+
+#### Required GitHub Secrets
+
+Configure these in the repository settings under **Settings > Secrets and variables > Actions**:
+
+| Secret | Purpose |
+|--------|---------|
+| `DOCKERHUB_USERNAME` | Docker Hub account username |
+| `DOCKERHUB_TOKEN` | Docker Hub access token ([create one here](https://hub.docker.com/settings/security)) |
+
+Cosign uses GitHub OIDC (keyless) — no additional secrets are needed for image signing.
+
+#### Manual Push
+
+```bash
+make push DOCKER_REGISTRY=cyberthreatplayground
+```
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please ensure:
@@ -527,8 +588,8 @@ Contributions are welcome! Please ensure:
 
 ## 📝 License
 
-DeepHunter is developed by Sebastien Damaye.  
-This Docker deployment configuration is provided as-is.
+This Docker deployment configuration is licensed under the [MIT License](LICENSE).  
+DeepHunter is developed by Sebastien Damaye.
 
 ## 🆘 Support
 
