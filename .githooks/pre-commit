@@ -10,13 +10,6 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PATTERNS_FILE="$REPO_ROOT/.githooks/forbidden-patterns.txt"
 
-# #region agent log
-_DLOG="$REPO_ROOT/debug-385c01.log"
-_dlog() { printf '{"sessionId":"385c01","hypothesisId":"%s","location":".githooks/pre-commit","message":"%s","data":%s,"timestamp":%s}\n' "$1" "$2" "$3" "$(date +%s000)" >> "$_DLOG"; }
-_dlog "H3" "hook-invoked" '{"repoRoot":"'"$REPO_ROOT"'"}' 
-_dlog "H5" "patterns-file-check" '{"patternsFile":"'"$PATTERNS_FILE"'","exists":"'"$([ -f "$PATTERNS_FILE" ] && echo true || echo false)"'"}' 
-# #endregion
-
 echo "Running pre-commit checks..."
 
 # Check if docker-compose.yml is valid
@@ -78,21 +71,11 @@ else
         STAGED_FILES=$(git diff --cached --name-only --diff-filter=d)
         FOUND=0
 
-        # #region agent log
-        _dlog "H2" "staged-files" '{"stagedFiles":"'"$STAGED_FILES"'","patternCount":'"${#PATTERNS[@]}"',"patterns":"'"$(IFS=,; echo "${PATTERNS[*]}")"'"}'
-        # #endregion
-
         for file in $STAGED_FILES; do
-            # #region agent log
-            _dlog "H2" "checking-file" '{"file":"'"$file"'","fileExists":"'"$([ -f "$file" ] && echo true || echo false)"'"}'
-            # #endregion
             [ -f "$file" ] || continue
             for pattern in "${PATTERNS[@]}"; do
                 # -I skip binary, -i case-insensitive, -F fixed-string, -n line numbers
                 MATCHES=$(grep -niFI -- "$pattern" "$file" 2>/dev/null || true)
-                # #region agent log
-                _dlog "H2" "grep-result" '{"file":"'"$file"'","pattern":"'"$pattern"'","matchEmpty":"'"$([ -z "$MATCHES" ] && echo true || echo false)"'"}'
-                # #endregion
                 if [ -n "$MATCHES" ]; then
                     if [ "$FOUND" -eq 0 ]; then
                         echo ""
