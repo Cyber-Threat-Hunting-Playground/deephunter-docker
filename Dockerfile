@@ -35,8 +35,8 @@ RUN /data/venv/bin/pip install --no-cache-dir \
     drf-spectacular==0.28.0
 
 # Enable plugins (symlink from catalog/ into the plugins package root)
-RUN cd /data/deephunter/plugins && \
-    ln -s /data/deephunter/plugins/catalog/sentinelone.py
+WORKDIR /data/deephunter/plugins
+RUN ln -s /data/deephunter/plugins/catalog/sentinelone.py .
 #    To enable additional plugins, add more symlinks here:
 #    ln -s /data/deephunter/plugins/catalog/virustotal.py && \
 #    ln -s /data/deephunter/plugins/catalog/github.py && \
@@ -72,7 +72,8 @@ COPY patch/config/decorators.py /data/deephunter/config/decorators.py
 RUN find /data -type f \( -name '*.py' -o -name '*.sh' \) -exec sed -i 's/\r$//' {} +
 
 # Collect static files (admin, DRF, Swagger, etc.) into STATIC_ROOT
-RUN cd /data/deephunter && /data/venv/bin/python manage.py collectstatic --noinput 2>/dev/null || true
+WORKDIR /data/deephunter
+RUN /data/venv/bin/python manage.py collectstatic --noinput 2>/dev/null || true
 
 # Install crontab
 RUN mkdir -p /var/spool/cron/crontabs/ && \
