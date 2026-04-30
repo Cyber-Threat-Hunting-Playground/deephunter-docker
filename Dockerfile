@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM debian:bookworm-slim AS builder
+FROM debian:13.4-slim AS builder
 
 ARG GITHUB_REPO=Cyber-Threat-Hunting-Playground/deephunter
 ARG DEEPHUNTER_VERSION=2.5
@@ -106,7 +106,7 @@ RUN find /data/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
 # ======================================================================
 # Final stage – runtime only, no build tools
 # ======================================================================
-FROM debian:bookworm-slim
+FROM debian:13.4-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
